@@ -17,9 +17,9 @@ def get_instance_noisy_label(n, dataset, labels, num_classes, feature_size, norm
     # seed -> random_seed
     print("building dataset...")
     label_num = num_classes
-    np.random.seed(int(seed))
-    torch.manual_seed(int(seed))
-    torch.cuda.manual_seed(int(seed))
+    # np.random.seed(int(seed))
+    # torch.manual_seed(int(seed))
+    # torch.cuda.manual_seed(int(seed))
 
     P = []
     flip_distribution = stats.truncnorm((0 - n) / norm_std, (1 - n) / norm_std, loc=n, scale=norm_std)

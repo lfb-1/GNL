@@ -18,4 +18,5 @@ def cifar10_configs(r, root_dir):
     config["wandb"] = True
     config["beta"] = 0.9
     config["lr_decay"] = [100]
+    config['num_prior'] = 1
     return EasyDict(config)

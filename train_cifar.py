@@ -23,6 +23,7 @@ class CIFAR_Trainer:
         self.warmup_epochs = config.warmup_epochs
         self.total_epochs = config.total_epochs
         self.num_classes = config.num_classes
+        self.num_pri = config.num_prior
         self.beta = config.beta
 
         self.net = resnet_cifar34(self.num_classes).cuda()
@@ -98,26 +99,26 @@ class CIFAR_Trainer:
             pred = F.one_hot(mov.sample_latent(idx).sample(), self.num_classes).float()
             prior_cov = torch.logical_or(pred, onehot_labels).float()
 
-            prior_unc = sample_neg(
+            prior_unc = [sample_neg(
                 prior_cov, self.num_classes, probs[idx] if probs is not None else None
-            )
-            prior = (prior_cov + prior_unc).clamp(max=1.0)
-            prior = prior / prior.sum(1, keepdim=True)
+            ) for i in range(self.num_pri)]
+            prior = [(prior_cov + prior_unc[i]).clamp(max=1.0) for i in range(self.num_pri)]
+            prior = [prior[i] / prior[i].sum(1, keepdim=True) for i in range(self.num_pri)]
 
             mov.update_hist(outputs.softmax(1), idx)
 
             log_outputs = outputs.log_softmax(1)
-            log_prior = prior.clamp(1e-9).log()
+            log_prior = [prior[i].clamp(1e-9).log() for i in range(self.num_pri)]
             log_tildey = tildey.log_softmax(1)
             ce = self.criterion(tildey, targets).mean()
-            pri = prior_loss(log_outputs, log_prior)
-            reg_kl = regkl_loss(log_outputs, log_tildey, log_prior)
+            pri = sum([prior_loss(log_outputs, log_prior[i]) for i in range(self.num_pri)]) / self.num_pri
+            reg_kl = sum([regkl_loss(log_outputs, log_tildey, log_prior[i]) for i in range(self.num_pri)]) / self.num_pri
             l = ce + pri + reg_kl
 
             l.backward()
             optimizer.step()
 
-            self.metrics_update(inputs, clean, prior, ce, pri, reg_kl)
+            self.metrics_update(inputs, clean, prior[0], ce, pri, reg_kl)
             self.train_acc.update(self.calc_acc(outputs, clean.int()).item() * 100.0)
 
     @torch.no_grad()
