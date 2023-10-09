@@ -1,8 +1,10 @@
 import torch
-from ResNet import resnet_cifar34
+
+# from ResNet import resnet_cifar34
+from PreResNet import ResNet18
 import torch.optim as optim
 import torch.nn as nn
-from dataloader_cifar import cifar_dataloader
+import dataloader_red as dataloader
 import wandb
 import pandas as pd
 from helper import AverageMeter
@@ -18,15 +20,16 @@ import torch.distributions as dist
 import numpy as np
 
 
-class CIFAR_Trainer:
+class RED_Trainer:
     def __init__(self, config, name: str):
         self.warmup_epochs = config.warmup_epochs
         self.total_epochs = config.total_epochs
         self.num_classes = config.num_classes
         self.num_pri = config.num_prior
         self.beta = config.beta
+        self.optim_goal = config.optim_goal
 
-        self.net = resnet_cifar34(self.num_classes).cuda()
+        self.net = ResNet18(self.num_classes).cuda()
         self.optim = optim.SGD(
             self.net.parameters(),
             lr=config.lr,
@@ -34,23 +37,26 @@ class CIFAR_Trainer:
             weight_decay=config.wd,
             nesterov=config.nesterov,
         )
-        self.latent = DynamicPartial(50000, config.beta, config.num_classes)
 
         self.scheduler = optim.lr_scheduler.MultiStepLR(
             self.optim, milestones=config.lr_decay, gamma=0.1
         )
 
         self.criterion = nn.CrossEntropyLoss(reduction="none").cuda()
-        loader = cifar_dataloader(
-            config.dataset,
-            config.r,
-            config.noise_mode,
-            config.batch_size,
-            config.num_workers,
-            config.root_dir,
+        loader = dataloader.red_dataloader(
+            r=config.r,
+            noise_mode=config.noise_mode,
+            batch_size=config.batch_size,
+            num_workers=5,
+            root_dir=config.root_dir,
+            noise_file="%s/%.1f_%s.json" % (config.root_dir, config.r, config.noise_mode),
         )
 
-        self.train_loader, self.eval_loader = loader.run("train")
+        self.train_loader = loader.run("warmup")
+        self.eval_loader = loader.run("eval_train")
+        self.latent = DynamicPartial(
+            len(self.eval_loader.dataset.train_imgs), config.beta, config.num_classes
+        )
         self.test_loader = loader.run("test")
         if config.wandb:
             self.use_wandb = True
@@ -88,16 +94,19 @@ class CIFAR_Trainer:
 
     def train(self, epoch: int, net: nn.Module, optimizer: optim.SGD, mov: DynamicPartial, probs=None):
         net.train()
-        for batch_idx, (inputs, targets, clean, idx) in enumerate(
+        for batch_idx, (inputs, targets, idx) in enumerate(
             tqdm(self.train_loader, desc=f"Epoch: {epoch}")
         ):
-            inputs, targets, clean = inputs.cuda(), targets.cuda(), clean.cuda().to(torch.int64)
+            inputs, targets = inputs.cuda(), targets.cuda()
             onehot_labels = F.one_hot(targets, self.num_classes).cuda()
 
             optimizer.zero_grad()
             outputs, tildey, _ = net(inputs)
 
-            pred = [F.one_hot(mov.sample_latent(idx).sample(), self.num_classes).float() for i in range(self.num_pri)]
+            pred = [
+                F.one_hot(mov.sample_latent(idx).sample(), self.num_classes).float()
+                for i in range(self.num_pri)
+            ]
             prior_cov = [(pred[i] + onehot_labels).clamp(max=1.0) for i in range(self.num_pri)]
             # prior_cov = [torch.logical_or(pred[i], onehot_labels).float() for i in range(self.num_pri)]
 
@@ -118,7 +127,12 @@ class CIFAR_Trainer:
                 sum([prior_loss(log_outputs, log_prior[i]) for i in range(self.num_pri)]) / self.num_pri
             )
             reg_kl = (
-                sum([regkl_loss(log_outputs, tildey, log_prior[i]) for i in range(self.num_pri)])
+                sum(
+                    [
+                        regkl_loss(log_outputs, tildey, log_prior[i], self.optim_goal)
+                        for i in range(self.num_pri)
+                    ]
+                )
                 / self.num_pri
             )
             l = ce + pri + reg_kl
@@ -126,14 +140,14 @@ class CIFAR_Trainer:
             l.backward()
             optimizer.step()
 
-            self.metrics_update(inputs, clean, targets, prior[0], ce, pri, reg_kl)
-            self.train_acc.update(self.calc_acc(outputs, clean.int()).item() * 100.0)
+            self.metrics_update(inputs, targets, prior[0], ce, pri, reg_kl)
+            # self.train_acc.update(self.calc_acc(outputs, clean.int()).item() * 100.0)
 
     @torch.no_grad()
     def eval_train(self, net: nn.Module, num_classes=100):
         net.eval()
         losses = torch.zeros(50000)
-        for batch_idx, (inputs, targets, clean, index) in enumerate(self.eval_loader):
+        for batch_idx, (inputs, targets, index) in enumerate(self.eval_loader):
             inputs, targets = inputs.cuda(), targets.cuda()
             outputs, tildey, _ = net(inputs)
             # loss = F.kl_div(outputs.log_softmax(1),tildey.log_softmax(1),reduction='none',log_target=True).sum(1)
@@ -160,15 +174,15 @@ class CIFAR_Trainer:
             outputs, _, _ = net(inputs)
             self.test_acc.update(self.calc_acc(outputs, targets.int()).item() * 100.0)
 
-    def metrics_update(self, inputs, clean, targets, prior, ce, pri, reg_kl):
-        self.m_cov.update(
-            torch.logical_and(prior, F.one_hot(clean, self.num_classes)).sum().item(),
-            inputs.shape[0],
-        )
-        clean_index = targets == clean
-        noisy_index = targets != clean
-        self.m_unc_clean.update(((prior[clean_index] > 0).sum(1).float().mean().item()))
-        self.m_unc_noisy.update(((prior[noisy_index] > 0).sum(1).float().mean().item()))
+    def metrics_update(self, inputs, targets, prior, ce, pri, reg_kl):
+        # self.m_cov.update(
+        #     torch.logical_and(prior, F.one_hot(clean, self.num_classes)).sum().item(),
+        #     inputs.shape[0],
+        # )
+        # clean_index = targets == clean
+        # noisy_index = targets != clean
+        # self.m_unc_clean.update(((prior[clean_index] > 0).sum(1).float().mean().item()))
+        # self.m_unc_noisy.update(((prior[noisy_index] > 0).sum(1).float().mean().item()))
 
         # self.m_unc.update((prior > 0).sum(1).float().mean().item())
         self.l_ce.update(ce.item())
