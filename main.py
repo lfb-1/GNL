@@ -33,7 +33,7 @@ elif args.config == "cifar100":
     config = cifar100_configs(args.r, args.root)
     trainer = CIFAR_Trainer(config, args.desc)
 elif args.config == "red":
-    config = red_configs(args.r, args.root)
+    config = red_configs(args.r, args.root, args.optim_goal)
     trainer = RED_Trainer(config, args.desc)
 else:
     raise NotImplementedError

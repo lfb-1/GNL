@@ -57,6 +57,7 @@ class RED_Trainer:
         self.latent = DynamicPartial(
             len(self.eval_loader.dataset.train_imgs), config.beta, config.num_classes
         )
+        # print(len(self.eval_loader.dataset.train_imgs))
         self.test_loader = loader.run("test")
         if config.wandb:
             self.use_wandb = True
@@ -146,12 +147,12 @@ class RED_Trainer:
     @torch.no_grad()
     def eval_train(self, net: nn.Module, num_classes=100):
         net.eval()
-        losses = torch.zeros(50000)
+        losses = torch.zeros(len(self.eval_loader.dataset.train_imgs))
         for batch_idx, (inputs, targets, index) in enumerate(self.eval_loader):
             inputs, targets = inputs.cuda(), targets.cuda()
             outputs, tildey, _ = net(inputs)
             # loss = F.kl_div(outputs.log_softmax(1),tildey.log_softmax(1),reduction='none',log_target=True).sum(1)
-            loss = F.cross_entropy(outputs, targets, reduction="none")
+            loss = F.cross_entropy(tildey, targets, reduction="none")
             # loss = -torch.sum(
             #     outputs.softmax(1) * F.one_hot(targets, num_classes).float().clamp(min=1e-9).log(), dim=1
             # )

@@ -137,7 +137,7 @@ class red_dataloader:
                 shuffle=True,
                 num_workers=self.num_workers,
                 drop_last=False,
-                # pin_memory=True,
+                pin_memory=True,
             )
             return trainloader
 

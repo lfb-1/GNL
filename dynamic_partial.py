@@ -64,7 +64,7 @@ def prior_loss(log_outputs, log_prior):
     return F.kl_div(
         log_outputs,
         (log_prior + log_outputs.log_softmax(0)).log_softmax(1),
-        # log_outputs,
+        # log_outputs.detach(),
         reduction="batchmean",
         log_target=True,
     )
@@ -82,7 +82,7 @@ def regkl_loss(log_outputs, tildey, log_prior, optim_goal="pxy"):
         # (tildey.log_softmax(1) + log_prior).log_softmax(1), # p(X|Y)
         (
             tildey.log_softmax(1) + (log_outputs.log_softmax(0).detach() + log_prior).log_softmax(1)
-            if optim_goal == "pxy"
+            if optim_goal == "pyx"
             else log_prior
         ).log_softmax(1),
         log_outputs.detach(),
