@@ -152,7 +152,7 @@ class RED_Trainer:
             inputs, targets = inputs.cuda(), targets.cuda()
             outputs, tildey, _ = net(inputs)
             # loss = F.kl_div(outputs.log_softmax(1),tildey.log_softmax(1),reduction='none',log_target=True).sum(1)
-            loss = F.cross_entropy(tildey, targets, reduction="none")
+            loss = F.cross_entropy(outputs, targets, reduction="none")
             # loss = -torch.sum(
             #     outputs.softmax(1) * F.one_hot(targets, num_classes).float().clamp(min=1e-9).log(), dim=1
             # )

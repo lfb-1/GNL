@@ -81,7 +81,8 @@ def regkl_loss(log_outputs, tildey, log_prior, optim_goal="pxy"):
     return F.kl_div(
         # (tildey.log_softmax(1) + log_prior).log_softmax(1), # p(X|Y)
         (
-            tildey.log_softmax(1) + (log_outputs.log_softmax(0).detach() + log_prior).log_softmax(1)
+            tildey.log_softmax(1)
+            + torch.logsumexp(log_outputs.log_softmax(0).detach() + log_prior, dim=1, keepdim=True)
             if optim_goal == "pyx"
             else log_prior
         ).log_softmax(1),
