@@ -26,11 +26,12 @@ torch.backends.cudnn.benchmark = False
 torch.backends.cudnn.deterministic = True
 
 # for i in [0.2,0.3,0.4,0.5,0.6]:
+print(f'Optimize in {args.optim_goal}')
 if args.config == "cifar10":
-    config = cifar10_configs(args.r, args.root)
+    config = cifar10_configs(args.r, args.root, args.optim_goal)
     trainer = CIFAR_Trainer(config, args.desc)
 elif args.config == "cifar100":
-    config = cifar100_configs(args.r, args.root)
+    config = cifar100_configs(args.r, args.root,args.optim_goal)
     trainer = CIFAR_Trainer(config, args.desc)
 elif args.config == "red":
     config = red_configs(args.r, args.root, args.optim_goal)

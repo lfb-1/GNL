@@ -1,7 +1,7 @@
 from easydict import EasyDict
 
 
-def cifar10_configs(r, root_dir):
+def cifar10_configs(r, root_dir, optim_goal="pxy"):
     config = {}
     config["warmup_epochs"] = 10
     config["total_epochs"] = 150
@@ -18,10 +18,12 @@ def cifar10_configs(r, root_dir):
     config["wandb"] = True
     config["beta"] = 0.9
     config["lr_decay"] = [100]
-    config['num_prior'] = 1
+    config["num_prior"] = 1
+    config["optim_goal"] = optim_goal
     return EasyDict(config)
 
-def cifar100_configs(r, root_dir,optim_goal='pxy'):
+
+def cifar100_configs(r, root_dir, optim_goal="pxy"):
     config = {}
     config["warmup_epochs"] = 10
     config["total_epochs"] = 150
@@ -38,10 +40,12 @@ def cifar100_configs(r, root_dir,optim_goal='pxy'):
     config["wandb"] = True
     config["beta"] = 0.9
     config["lr_decay"] = [100]
-    config['num_prior'] = 1
+    config["num_prior"] = 1
+    config["optim_goal"] = optim_goal
     return EasyDict(config)
- 
-def red_configs(r, root_dir, optim_goal='pxy'):
+
+
+def red_configs(r, root_dir, optim_goal="pxy"):
     config = {}
     config["warmup_epochs"] = 10
     config["total_epochs"] = 150
@@ -58,7 +62,6 @@ def red_configs(r, root_dir, optim_goal='pxy'):
     config["wandb"] = True
     config["beta"] = 0.9
     config["lr_decay"] = [100]
-    config['num_prior'] = 1
-    config['optim_goal'] = optim_goal    
+    config["num_prior"] = 1
+    config["optim_goal"] = optim_goal
     return EasyDict(config)
- 

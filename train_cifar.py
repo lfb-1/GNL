@@ -25,6 +25,7 @@ class CIFAR_Trainer:
         self.num_classes = config.num_classes
         self.num_pri = config.num_prior
         self.beta = config.beta
+        self.optim_goal = config.optim_goal
 
         self.net = resnet_cifar34(self.num_classes).cuda()
         self.optim = optim.SGD(
@@ -97,7 +98,10 @@ class CIFAR_Trainer:
             optimizer.zero_grad()
             outputs, tildey, _ = net(inputs)
 
-            pred = [F.one_hot(mov.sample_latent(idx).sample(), self.num_classes).float() for i in range(self.num_pri)]
+            pred = [
+                F.one_hot(mov.sample_latent(idx).sample(), self.num_classes).float()
+                for i in range(self.num_pri)
+            ]
             prior_cov = [(pred[i] + onehot_labels).clamp(max=1.0) for i in range(self.num_pri)]
             # prior_cov = [torch.logical_or(pred[i], onehot_labels).float() for i in range(self.num_pri)]
 
@@ -118,7 +122,12 @@ class CIFAR_Trainer:
                 sum([prior_loss(log_outputs, log_prior[i]) for i in range(self.num_pri)]) / self.num_pri
             )
             reg_kl = (
-                sum([regkl_loss(log_outputs, tildey, log_prior[i]) for i in range(self.num_pri)])
+                sum(
+                    [
+                        regkl_loss(log_outputs, tildey, log_prior[i], self.optim_goal)
+                        for i in range(self.num_pri)
+                    ]
+                )
                 / self.num_pri
             )
             l = ce + pri + reg_kl

@@ -63,26 +63,22 @@ def prior_loss(log_outputs, log_prior):
     # )
     return F.kl_div(
         log_outputs,
-        (log_prior + log_outputs.log_softmax(0)).log_softmax(1),
-        # log_outputs.detach(),
+        (log_prior + (log_outputs - torch.logsumexp(log_outputs, dim=0, keepdim=True))).log_softmax(1),
         reduction="batchmean",
         log_target=True,
     )
 
 
 def regkl_loss(log_outputs, tildey, log_prior, optim_goal="pxy"):
-    # return F.kl_div(
-    #     # (log_tildey.log_softmax(1) + log_prior).log_softmax(1),
-    #     log_tildey.log_softmax(1),
-    #     log_outputs.detach(),
-    #     reduction="batchmean",
-    #     log_target=True,
-    # )
     return F.kl_div(
-        # (tildey.log_softmax(1) + log_prior).log_softmax(1), # p(X|Y)
         (
             tildey.log_softmax(1)
-            + torch.logsumexp(log_outputs.log_softmax(0).detach() + log_prior, dim=1, keepdim=True)
+            # + torch.logsumexp(log_outputs.log_softmax(0).detach() + log_prior, dim=1, keepdim=True)
+            + torch.logsumexp(
+                (log_outputs - torch.logsumexp(log_outputs, dim=0, keepdim=True)).detach() + log_prior,
+                dim=1,
+                keepdim=True,
+            )
             if optim_goal == "pyx"
             else log_prior
         ).log_softmax(1),
