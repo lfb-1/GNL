@@ -9,7 +9,7 @@ from helper import AverageMeter
 import torchmetrics as tm
 from tqdm import tqdm
 import torch.nn.functional as F
-from dynamic_partial import DynamicPartial, sample_neg, prior_loss, regkl_loss
+from dynamic_partial import DynamicPartial, sample_neg, prior_loss, pxy_kl, pyx_kl
 from easydict import EasyDict
 from sklearn.mixture import GaussianMixture
 import torch.distributions as dist
@@ -25,7 +25,7 @@ class CIFAR_Trainer:
         self.num_classes = config.num_classes
         self.num_pri = config.num_prior
         self.beta = config.beta
-        self.optim_goal = config.optim_goal
+        self.reg_kl = pxy_kl if config.optim_goal == "pxy" else pyx_kl
 
         self.net = resnet_cifar34(self.num_classes).cuda()
         self.optim = optim.SGD(
@@ -122,12 +122,7 @@ class CIFAR_Trainer:
                 sum([prior_loss(log_outputs, log_prior[i]) for i in range(self.num_pri)]) / self.num_pri
             )
             reg_kl = (
-                sum(
-                    [
-                        regkl_loss(log_outputs, tildey, log_prior[i], self.optim_goal)
-                        for i in range(self.num_pri)
-                    ]
-                )
+                sum([self.reg_kl(log_outputs, tildey, log_prior[i]) for i in range(self.num_pri)])
                 / self.num_pri
             )
             l = ce + pri + reg_kl
