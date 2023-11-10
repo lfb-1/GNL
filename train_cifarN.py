@@ -2,7 +2,8 @@ import torch
 from ResNet import resnet_cifar34
 import torch.optim as optim
 import torch.nn as nn
-from dataloader_cifar import cifar_dataloader
+
+from dataloader_cifarN import cifar_dataloader
 import wandb
 import pandas as pd
 from helper import AverageMeter
@@ -18,7 +19,7 @@ import torch.distributions as dist
 import numpy as np
 
 
-class CIFAR_Trainer:
+class CIFARN_Trainer:
     def __init__(self, config, name: str):
         self.warmup_epochs = config.warmup_epochs
         self.total_epochs = config.total_epochs
@@ -36,22 +37,18 @@ class CIFAR_Trainer:
             nesterov=config.nesterov,
         )
         self.latent = DynamicPartial(50000, config.beta, config.num_classes)
-
         self.scheduler = optim.lr_scheduler.MultiStepLR(
             self.optim, milestones=config.lr_decay, gamma=0.1
         )
-
         self.criterion = nn.CrossEntropyLoss(reduction="none").cuda()
         loader = cifar_dataloader(
             config.dataset,
-            config.r,
-            config.noise_mode,
-            config.batch_size,
-            config.num_workers,
-            config.root_dir,
+            batch_size=config.batch_size,
+            num_workers=config.num_workers,
+            root_dir=config.root_dir,
         )
-
-        self.train_loader, self.eval_loader = loader.run("train")
+        self.train_loader = loader.run("warmup", target=config.target)
+        self.eval_loader = loader.run("eval_train", target=config.target)
         self.test_loader = loader.run("test")
         if config.wandb:
             self.use_wandb = True
@@ -59,12 +56,10 @@ class CIFAR_Trainer:
             wandb.init(project="GNL", config=config, name=name)
         else:
             self.use_wandb = False
-
         self.logger = pd.DataFrame(
             # columns=["train acc", "train cov", "train ineff", "test acc", "test cov", "test ineff"]
             columns=["train acc", "test acc", "clean_cov", "noisy_cov", "clean_unc", "clean_unc"]
         )
-
         self.train_acc = AverageMeter()
         self.m_cov = AverageMeter()
         self.m_unc_clean = AverageMeter()
@@ -87,33 +82,33 @@ class CIFAR_Trainer:
             self.wandb_update(epoch)
             self.scheduler.step()
 
-    def train(self, epoch: int, net: nn.Module, optimizer: optim.SGD, mov: DynamicPartial, probs=None):
+    def train(self, epoch, net, optimizer, mov, probs=None):
         net.train()
-        for batch_idx, (inputs, targets, clean, idx) in enumerate(
+        for batch_idx, (inputs, targets, idx) in enumerate(
             tqdm(self.train_loader, desc=f"Epoch: {epoch}")
         ):
-            inputs, targets, clean = inputs.cuda(), targets.cuda(), clean.cuda().to(torch.int64)
+            inputs, targets, clean = (
+                inputs.cuda(),
+                targets.cuda(),
+                self.train_loader.dataset.clean_label[idx].cuda().to(torch.int64),
+            )
             onehot_labels = F.one_hot(targets, self.num_classes).cuda()
 
             optimizer.zero_grad()
             outputs, tildey, _ = net(inputs)
 
-            pred = [
-                F.one_hot(mov.sample_latent(idx).sample(), self.num_classes).float()
-                for i in range(self.num_pri)
-            ]
-            prior_cov = [(pred[i] + onehot_labels).clamp(max=1.0) for i in range(self.num_pri)]
+            pred = F.one_hot(mov.sample_latent(idx).sample(), self.num_classes).float() 
+            prior_cov = (pred + onehot_labels).clamp(max=1.0)
             # prior_cov = [torch.logical_or(pred[i], onehot_labels).float() for i in range(self.num_pri)]
 
             prior_unc = [
-                sample_neg(prior_cov[i], self.num_classes, probs[idx] if probs is not None else None)
+                sample_neg(prior_cov, self.num_classes, probs[idx] if probs is not None else None)
                 for i in range(self.num_pri)
             ]
-            prior = [(prior_cov[i] + prior_unc[i]).clamp(max=1.0) for i in range(self.num_pri)]
+            prior = [(prior_cov + prior_unc[i]).clamp(max=1.0) for i in range(self.num_pri)]
             prior = [prior[i] / prior[i].sum(1, keepdim=True) for i in range(self.num_pri)]
 
             mov.update_hist(outputs.softmax(1), idx)
-
             log_outputs = outputs.log_softmax(1)
             log_prior = [prior[i].clamp(1e-9).log() for i in range(self.num_pri)]
             # log_tildey = tildey.log_softmax(1)
@@ -130,21 +125,17 @@ class CIFAR_Trainer:
             l.backward()
             optimizer.step()
 
-            self.metrics_update(inputs, clean, targets, prior[0], prior_cov[0], ce, pri, reg_kl)
+            self.metrics_update(inputs, clean, targets, prior[0], prior_cov, ce, pri, reg_kl)
             self.train_acc.update(self.calc_acc(outputs, clean.int()).item() * 100.0)
 
     @torch.no_grad()
     def eval_train(self, net: nn.Module, num_classes=100):
         net.eval()
         losses = torch.zeros(50000)
-        for batch_idx, (inputs, targets, clean, index) in enumerate(self.eval_loader):
+        for batch_idx, (inputs, targets, index) in enumerate(self.eval_loader):
             inputs, targets = inputs.cuda(), targets.cuda()
             outputs, tildey, _ = net(inputs)
-            # loss = F.kl_div(outputs.log_softmax(1),tildey.log_softmax(1),reduction='none',log_target=True).sum(1)
             loss = F.cross_entropy(outputs, targets, reduction="none")
-            # loss = -torch.sum(
-            #     outputs.softmax(1) * F.one_hot(targets, num_classes).float().clamp(min=1e-9).log(), dim=1
-            # )
             for b in range(inputs.size(0)):
                 losses[index[b]] = loss[b]
         losses = ((losses - losses.min()) / (losses.max() - losses.min())).unsqueeze(1)
@@ -164,7 +155,7 @@ class CIFAR_Trainer:
             outputs, _, _ = net(inputs)
             self.test_acc.update(self.calc_acc(outputs, targets.int()).item() * 100.0)
 
-    def metrics_update(self, inputs, clean, targets, prior, prior_cov,ce, pri, reg_kl):
+    def metrics_update(self, inputs, clean, targets, prior, prior_cov, ce, pri, reg_kl):
         self.m_cov.update(
             torch.logical_and(prior * prior_cov, F.one_hot(clean, self.num_classes)).sum().item(),
             inputs.shape[0],

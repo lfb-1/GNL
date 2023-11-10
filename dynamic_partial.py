@@ -50,20 +50,19 @@ def sample_neg(prior_cov, num_classes, num=None):
             for i in range(probs.shape[0])
         ]
     ).cuda()
+    neg[neg > 1] = 1
 
     return neg
 
 
+#! Two approaches for Eq. 11
+#! Option 1: log_outputs.softmax(0)
+#! Option 2: log_outputs / log_outputs.sum(0,keepdim=True), logsumexp is used for computing in log space
 def prior_loss(log_outputs, log_prior):
-    # return F.kl_div(
-    #     log_outputs,
-    #     (log_prior + log_outputs.log_softmax(0)).log_softmax(1),
-    #     reduction="batchmean",
-    #     log_target=True,
-    # )
     return F.kl_div(
         log_outputs,
-        (log_prior + (log_outputs - torch.logsumexp(log_outputs, dim=0, keepdim=True))).log_softmax(1),
+        (log_prior + log_outputs.log_softmax(0)).log_softmax(1),
+        # (log_prior + (log_outputs - torch.logsumexp(log_outputs, dim=0, keepdim=True))).log_softmax(1),
         reduction="batchmean",
         log_target=True,
     )
@@ -82,12 +81,12 @@ def pyx_kl(log_outputs, tildey, log_prior):
     return F.kl_div(
         (
             tildey.log_softmax(1)
-            # + torch.logsumexp(log_outputs.log_softmax(0).detach() + log_prior, dim=1, keepdim=True)
-            + torch.logsumexp(
-                (log_outputs - torch.logsumexp(log_outputs, dim=0, keepdim=True)) + log_prior,
-                dim=1,
-                keepdim=True,
-            )
+            + torch.logsumexp(log_outputs.log_softmax(0) + log_prior, dim=1, keepdim=True)
+            # + torch.logsumexp(
+            #     (log_outputs - torch.logsumexp(log_outputs, dim=0, keepdim=True)) + log_prior,
+            #     dim=1,
+            #     keepdim=True,
+            # )
         ).log_softmax(1),
         log_outputs.detach(),
         reduction="batchmean",
