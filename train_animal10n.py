@@ -1,10 +1,10 @@
 import torch
-
-# from ResNet import resnet_cifar34
-from PreResNet import ResNet18
+from VGG import vgg19_bn
 import torch.optim as optim
 import torch.nn as nn
-import dataloader_red as dataloader
+
+# from dataloader_cifarN import cifar_dataloader
+import dataloader_animal10n as dataloader
 import wandb
 import pandas as pd
 from helper import AverageMeter
@@ -20,7 +20,7 @@ import torch.distributions as dist
 import numpy as np
 
 
-class RED_Trainer:
+class ANIMAL_Trainer:
     def __init__(self, config, name: str):
         self.warmup_epochs = config.warmup_epochs
         self.total_epochs = config.total_epochs
@@ -29,44 +29,44 @@ class RED_Trainer:
         self.beta = config.beta
         self.reg_kl = pxy_kl if config.optim_goal == "pxy" else pyx_kl
 
-        self.net = ResNet18(self.num_classes).cuda()
-        self.optim = optim.SGD(
-            self.net.parameters(),
-            lr=config.lr,
-            momentum=0.9,
-            weight_decay=config.wd,
-            nesterov=config.nesterov,
-        )
+        # self.net = resnet_cifar34(self.num_classes).cuda()
+        self.net, self.optim, self.scheduler = self.net_optim(config)
 
-        self.scheduler = optim.lr_scheduler.MultiStepLR(
-            self.optim, milestones=config.lr_decay, gamma=0.1
-        )
+        if config.cot == 2:
+            self.net2, self.optim2, self.scheduler2 = self.net_optim(config)
 
         self.criterion = nn.CrossEntropyLoss(reduction="none").cuda()
-        loader = dataloader.red_dataloader(
-            r=config.r,
-            noise_mode=config.noise_mode,
+        # loader = cifar_dataloader(
+        #     config.dataset,
+        #     batch_size=config.batch_size,
+        #     num_workers=config.num_workers,
+        #     root_dir=config.root_dir,
+        # )
+        loader = dataloader.animal_dataloader(
+            dataset=config.root_dir,
             batch_size=config.batch_size,
             num_workers=5,
-            root_dir=config.root_dir,
-            noise_file="%s/%.1f_%s.json"
-            % (config.root_dir, config.r, config.noise_mode),
+            saved=True,
         )
-
         self.train_loader = loader.run("warmup")
+        self.train_loader2 = loader.run("warmup")
         self.eval_loader = loader.run("eval_train")
-        self.latent = DynamicPartial(
-            len(self.eval_loader.dataset.train_imgs), config.beta, config.num_classes
-        )
-        # print(len(self.eval_loader.dataset.train_imgs))
         self.test_loader = loader.run("test")
+        self.latent = DynamicPartial(
+            len(self.eval_loader.dataset.train_data), config.beta, config.num_classes
+        )
+        if config.cot == 2:
+            self.latent2 = DynamicPartial(
+                len(self.eval_loader.dataset.train_data),
+                config.beta,
+                config.num_classes,
+            )
         if config.wandb:
             self.use_wandb = True
             wandb.login()
             wandb.init(project="GNL", config=config, name=name)
         else:
             self.use_wandb = False
-
         self.logger = pd.DataFrame(
             # columns=["train acc", "train cov", "train ineff", "test acc", "test cov", "test ineff"]
             columns=[
@@ -78,7 +78,6 @@ class RED_Trainer:
                 "clean_unc",
             ]
         )
-
         self.train_acc = AverageMeter()
         self.m_cov = AverageMeter()
         self.m_unc_clean = AverageMeter()
@@ -87,67 +86,99 @@ class RED_Trainer:
         self.l_pri = AverageMeter()
         self.l_kl = AverageMeter()
         self.test_acc = AverageMeter()
+        self.test_acc2 = AverageMeter()
         self.calc_acc = tm.Accuracy(
             task="multiclass", num_classes=config.num_classes
         ).cuda()
 
+    def net_optim(self, config):
+        net = vgg19_bn()
+        net.classifier2 = nn.Linear(4096, self.num_classes)
+        net.transition = nn.Linear(4096 + self.num_classes, self.num_classes)
+        net = net.cuda()
+
+        optimizer = optim.SGD(
+            net.parameters(),
+            lr=config.lr,
+            momentum=0.9,
+            weight_decay=config.wd,
+            nesterov=config.nesterov,
+        )
+
+        scheduler = optim.lr_scheduler.MultiStepLR(
+            optimizer, milestones=config.lr_decay, gamma=0.1
+        )
+        return net, optimizer, scheduler
+
     def pipeline(self, train_func):
         for epoch in range(self.total_epochs):
             if epoch < self.warmup_epochs:
-                self.train(epoch, self.net, self.optim, self.latent)
+                self.train(epoch, self.net, self.optim, self.latent, self.train_loader)
+                if self.net2 is not None:
+                    self.train(
+                        epoch, self.net2, self.optim2, self.latent2, self.train_loader
+                    )
             else:
                 probs = self.eval_train(self.net)
-                self.train(epoch, self.net, self.optim, self.latent, probs)
+                if self.net2 is not None:
+                    probs2 = self.eval_train(self.net2)
+                    self.train(
+                        epoch,
+                        self.net,
+                        self.optim,
+                        self.latent,
+                        self.train_loader,
+                        probs2,
+                    )
+                    self.train(
+                        epoch,
+                        self.net2,
+                        self.optim2,
+                        self.latent2,
+                        self.train_loader,
+                        probs,
+                    )
 
-            self.test(self.net)
+            self.test(self.net, net2=self.net2)
             self.wandb_update(epoch)
             self.scheduler.step()
+            self.scheduler2.step()
 
-    def train(
-        self,
-        epoch: int,
-        net: nn.Module,
-        optimizer: optim.SGD,
-        mov: DynamicPartial,
-        probs=None,
-    ):
+    def train(self, epoch, net, optimizer, mov1, train_loader, probs=None):
         net.train()
         for batch_idx, (inputs, targets, idx) in enumerate(
-            tqdm(self.train_loader, desc=f"Epoch: {epoch}")
+            tqdm(train_loader, desc=f"Epoch: {epoch}")
         ):
-            inputs, targets = inputs.cuda(), targets.cuda()
+            inputs, targets = (
+                inputs.cuda(),
+                targets.cuda(),
+                # self.train_loader.dataset.clean_label[idx].cuda().to(torch.int64),
+            )
             onehot_labels = F.one_hot(targets, self.num_classes).cuda()
 
             optimizer.zero_grad()
             outputs, tildey, _ = net(inputs)
 
-            pred = [
-                F.one_hot(mov.sample_latent(idx).sample(), self.num_classes).float()
-                for i in range(self.num_pri)
-            ]
-            prior_cov = [
-                (pred[i] + onehot_labels).clamp(max=1.0) for i in range(self.num_pri)
-            ]
+            pred = F.one_hot(mov1.sample_latent(idx).sample(), self.num_classes).float()
+            prior_cov = (pred + onehot_labels).clamp(max=1.0)
             # prior_cov = [torch.logical_or(pred[i], onehot_labels).float() for i in range(self.num_pri)]
 
             prior_unc = [
                 sample_neg(
-                    prior_cov[i],
+                    prior_cov,
                     self.num_classes,
                     probs[idx] if probs is not None else None,
                 )
                 for i in range(self.num_pri)
             ]
             prior = [
-                (prior_cov[i] + prior_unc[i]).clamp(max=1.0)
-                for i in range(self.num_pri)
+                (prior_cov + prior_unc[i]).clamp(max=1.0) for i in range(self.num_pri)
             ]
             prior = [
                 prior[i] / prior[i].sum(1, keepdim=True) for i in range(self.num_pri)
             ]
 
-            mov.update_hist(outputs.softmax(1), idx)
-
+            mov1.update_hist(outputs.softmax(1), idx)
             log_outputs = outputs.log_softmax(1)
             log_prior = [prior[i].clamp(1e-9).log() for i in range(self.num_pri)]
             # log_tildey = tildey.log_softmax(1)
@@ -178,15 +209,11 @@ class RED_Trainer:
     @torch.no_grad()
     def eval_train(self, net: nn.Module, num_classes=100):
         net.eval()
-        losses = torch.zeros(len(self.eval_loader.dataset.train_imgs))
+        losses = torch.zeros(50000)
         for batch_idx, (inputs, targets, index) in enumerate(self.eval_loader):
             inputs, targets = inputs.cuda(), targets.cuda()
             outputs, tildey, _ = net(inputs)
-            # loss = F.kl_div(outputs.log_softmax(1),tildey.log_softmax(1),reduction='none',log_target=True).sum(1)
             loss = F.cross_entropy(outputs, targets, reduction="none")
-            # loss = -torch.sum(
-            #     outputs.softmax(1) * F.one_hot(targets, num_classes).float().clamp(min=1e-9).log(), dim=1
-            # )
             for b in range(inputs.size(0)):
                 losses[index[b]] = loss[b]
         losses = ((losses - losses.min()) / (losses.max() - losses.min())).unsqueeze(1)
@@ -199,16 +226,25 @@ class RED_Trainer:
         return 1 - torch.from_numpy(prob).cuda()
 
     @torch.no_grad()
-    def test(self, net):
+    def test(self, net, net2=None):
         net.eval()
+        net2.eval()
         for batch_idx, (inputs, targets) in enumerate(self.test_loader):
             inputs, targets = inputs.cuda(), targets.cuda()
-            outputs, _, _ = net(inputs)
+            outputs1, _, _ = net(inputs)
+            if net2 is not None:
+                outputs2, _, _ = net2(inputs)
+                outputs = outputs1 + outputs2
+            else:
+                outputs = outputs1
+            # self.test_acc2.update(self.calc_acc(outputs2, targets.int()).item() * 100.0)
             self.test_acc.update(self.calc_acc(outputs, targets.int()).item() * 100.0)
 
     def metrics_update(self, inputs, targets, prior, ce, pri, reg_kl):
         # self.m_cov.update(
-        #     torch.logical_and(prior, F.one_hot(clean, self.num_classes)).sum().item(),
+        #     torch.logical_and(prior * prior_cov, F.one_hot(clean, self.num_classes))
+        #     .sum()
+        #     .item(),
         #     inputs.shape[0],
         # )
         # clean_index = targets == clean
@@ -247,5 +283,6 @@ class RED_Trainer:
                 self.m_unc_clean,
                 self.train_acc,
                 self.test_acc,
+                # self.test_acc2
             ]
         ]

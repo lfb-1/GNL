@@ -2,6 +2,7 @@
 from train_cifar import CIFAR_Trainer
 from train_red import RED_Trainer
 from train_cifarN import CIFARN_Trainer
+from train_animal10n import ANIMAL_Trainer
 from configs import *
 import argparse
 import torch
@@ -17,7 +18,10 @@ parser.add_argument("--seed", default=42, type=int)
 parser.add_argument("--desc", default="baseline", type=str)
 parser.add_argument("--config", default="cifar10", type=str)
 parser.add_argument("--optim_goal", default="pxy", type=str)
-parser.add_argument("--target", default="worse_label", type=str, help="Used only for CIFAR_N")
+parser.add_argument(
+    "--target", default="worse_label", type=str, help="Used only for CIFAR_N"
+)
+parser.add_argument("--cot", default=1, type=int, help="use coteaching")
 args = parser.parse_args()
 
 # random.seed(args.seed)
@@ -44,6 +48,9 @@ elif args.config == "cifar10n":
 elif args.config == "cifar100n":
     config = cifar100n_configs(args.target, args.root, args.optim_goal)
     trainer = CIFARN_Trainer(config, args.desc)
+elif args.config == "animal":
+    config = animal_configs(args.root, args.cot, args.optim_goal)
+    trainer = ANIMAL_Trainer(config, args.desc)
 else:
     raise NotImplementedError
 trainer.pipeline(trainer.train)
