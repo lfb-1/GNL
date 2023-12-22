@@ -23,28 +23,28 @@
 # done
 
 # CIFAR10N
-for s in 42 385 386
+for j in pxy
 do
-    for j in pxy pyx
+    for s in 42 385 386
     do
-        for i in worse_label aggre_label random_label1 random_label2 random_label3
+        for i in worse_label aggre_label #random_label1 random_label2 random_label3
         do
-            python main.py --target $i --desc "c10N"$j"_normgen_"$i"_"$s --optim_goal $j --config cifar10n --seed $s;
+            python main.py --target $i --desc "c10N"$j"_diffeq16_"$i"_"$s --optim_goal $j --config cifar10n --seed $s;
         done
     done
 done
 
 # CIFAR100N
-for s in 123 385 386
-do
-    for j in pxy pyx
-    do
-        for i in noisy_label
-        do
-            python main.py --target $i --root /media/hdd/fb/cifar-100-python --desc "c100N"$j"_normgen_"$i"_"$s --optim_goal $j --config cifar100n --seed $s;
-        done
-    done
-done
+# for j in pxy pyx
+# do
+#     for s in 123 385 386
+#     do
+#         for i in noisy_label
+#         do
+#             python main.py --target $i --root /media/hdd/fb/cifar-100-python --desc "c100N"$j"_cot_"$i"_"$s --optim_goal $j --config cifar100n --seed $s;
+#         done
+#     done
+# done
 
 # RED
 # for i in 0.2 0.4 0.6 0.8

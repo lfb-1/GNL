@@ -49,7 +49,7 @@ class ANIMAL_Trainer:
             saved=True,
         )
         self.train_loader = loader.run("warmup")
-        self.train_loader2 = loader.run("warmup")
+        # self.train_loader2 = loader.run("warmup")
         self.eval_loader = loader.run("eval_train")
         self.test_loader = loader.run("test")
         self.latent = DynamicPartial(
@@ -113,10 +113,10 @@ class ANIMAL_Trainer:
     def pipeline(self, train_func):
         for epoch in range(self.total_epochs):
             if epoch < self.warmup_epochs:
-                self.train(epoch, self.net, self.optim, self.latent, self.train_loader)
+                self.train(epoch, self.net, self.optim, self.latent, self.latent2)
                 if self.net2 is not None:
                     self.train(
-                        epoch, self.net2, self.optim2, self.latent2, self.train_loader
+                        epoch, self.net2, self.optim2, self.latent2, self.latent
                     )
             else:
                 probs = self.eval_train(self.net)
@@ -127,7 +127,7 @@ class ANIMAL_Trainer:
                         self.net,
                         self.optim,
                         self.latent,
-                        self.train_loader,
+                        self.latent2,
                         probs2,
                     )
                     self.train(
@@ -135,7 +135,7 @@ class ANIMAL_Trainer:
                         self.net2,
                         self.optim2,
                         self.latent2,
-                        self.train_loader,
+                        self.latent,
                         probs,
                     )
 
@@ -144,10 +144,10 @@ class ANIMAL_Trainer:
             self.scheduler.step()
             self.scheduler2.step()
 
-    def train(self, epoch, net, optimizer, mov1, train_loader, probs=None):
+    def train(self, epoch, net, optimizer, mov1, mov2, probs=None):
         net.train()
         for batch_idx, (inputs, targets, idx) in enumerate(
-            tqdm(train_loader, desc=f"Epoch: {epoch}")
+            tqdm(self.train_loader, desc=f"Epoch: {epoch}")
         ):
             inputs, targets = (
                 inputs.cuda(),
@@ -159,8 +159,9 @@ class ANIMAL_Trainer:
             optimizer.zero_grad()
             outputs, tildey, _ = net(inputs)
 
-            pred = F.one_hot(mov1.sample_latent(idx).sample(), self.num_classes).float()
-            prior_cov = (pred + onehot_labels).clamp(max=1.0)
+            pred = F.one_hot(mov2.sample_latent(idx).sample(), self.num_classes).float()
+            pred2 = F.one_hot(mov1.sample_latent(idx).sample(),self.num_classes).float()
+            prior_cov = (pred + onehot_labels + pred2).clamp(max=1.0)
             # prior_cov = [torch.logical_or(pred[i], onehot_labels).float() for i in range(self.num_pri)]
 
             prior_unc = [

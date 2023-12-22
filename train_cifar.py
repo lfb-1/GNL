@@ -125,7 +125,8 @@ class CIFAR_Trainer:
                 sum([self.reg_kl(log_outputs, tildey, log_prior[i]) for i in range(self.num_pri)])
                 / self.num_pri
             )
-            l = ce + pri + reg_kl
+            # l = ce + pri + reg_kl
+            l = pri
 
             l.backward()
             optimizer.step()

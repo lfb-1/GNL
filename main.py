@@ -1,8 +1,10 @@
 # from train_cifar import Trainer
 from train_cifar import CIFAR_Trainer
 from train_red import RED_Trainer
+# from train_cifarN_cot import CIFARN_Trainer
 from train_cifarN import CIFARN_Trainer
 from train_animal10n import ANIMAL_Trainer
+from train_clothing import C1M_Trainer
 from configs import *
 import argparse
 import torch
@@ -51,6 +53,9 @@ elif args.config == "cifar100n":
 elif args.config == "animal":
     config = animal_configs(args.root, args.cot, args.optim_goal)
     trainer = ANIMAL_Trainer(config, args.desc)
+elif args.config == 'c1m':
+    config = c1m_configs(args.root, args.optim_goal)
+    trainer = C1M_Trainer(config, args.desc)
 else:
     raise NotImplementedError
 trainer.pipeline(trainer.train)

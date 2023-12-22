@@ -28,18 +28,12 @@ class CIFARN_Trainer:
         self.beta = config.beta
         self.reg_kl = pxy_kl if config.optim_goal == "pxy" else pyx_kl
 
-        self.net = resnet_cifar34(self.num_classes).cuda()
-        self.optim = optim.SGD(
-            self.net.parameters(),
-            lr=config.lr,
-            momentum=0.9,
-            weight_decay=config.wd,
-            nesterov=config.nesterov,
+        self.net, self.optim, self.latent, self.scheduler = self.net_optim_sch_mov(
+            config
         )
-        self.latent = DynamicPartial(50000, config.beta, config.num_classes)
-        self.scheduler = optim.lr_scheduler.MultiStepLR(
-            self.optim, milestones=config.lr_decay, gamma=0.1
-        )
+        # self.net2, self.optim2, self.latent2, self.scheduler2 = self.net_optim_sch_mov(
+        #     config
+        # )
         self.criterion = nn.CrossEntropyLoss(reduction="none").cuda()
         loader = cifar_dataloader(
             config.dataset,
@@ -58,7 +52,14 @@ class CIFARN_Trainer:
             self.use_wandb = False
         self.logger = pd.DataFrame(
             # columns=["train acc", "train cov", "train ineff", "test acc", "test cov", "test ineff"]
-            columns=["train acc", "test acc", "clean_cov", "noisy_cov", "clean_unc", "clean_unc"]
+            columns=[
+                "train acc",
+                "test acc",
+                "clean_cov",
+                "noisy_cov",
+                "clean_unc",
+                "clean_unc",
+            ]
         )
         self.train_acc = AverageMeter()
         self.m_cov = AverageMeter()
@@ -68,21 +69,42 @@ class CIFARN_Trainer:
         self.l_pri = AverageMeter()
         self.l_kl = AverageMeter()
         self.test_acc = AverageMeter()
-        self.calc_acc = tm.Accuracy(task="multiclass", num_classes=config.num_classes).cuda()
+        self.calc_acc = tm.Accuracy(
+            task="multiclass", num_classes=config.num_classes
+        ).cuda()
+
+    def net_optim_sch_mov(self, config):
+        net = resnet_cifar34(self.num_classes).cuda()
+        optimizer = optim.SGD(
+            net.parameters(),
+            lr=config.lr,
+            momentum=0.9,
+            weight_decay=config.wd,
+            nesterov=config.nesterov,
+        )
+        latent = DynamicPartial(50000, config.beta, config.num_classes)
+        scheduler = optim.lr_scheduler.MultiStepLR(
+            optimizer, milestones=config.lr_decay, gamma=0.1
+        )
+        return net, optimizer, latent, scheduler
 
     def pipeline(self, train_func):
         for epoch in range(self.total_epochs):
             if epoch < self.warmup_epochs:
                 self.train(epoch, self.net, self.optim, self.latent)
+                # self.train(epoch, self.net2, self.optim2, self.latent2)
             else:
                 probs = self.eval_train(self.net)
+                # probs2 = self.eval_train(self.net2)
                 self.train(epoch, self.net, self.optim, self.latent, probs)
+                # self.train(epoch, self.net2, self.optim2, self.latent2,self.latent, probs)
 
             self.test(self.net)
             self.wandb_update(epoch)
             self.scheduler.step()
+            # self.scheduler2.step()
 
-    def train(self, epoch, net, optimizer, mov, probs=None):
+    def train(self, epoch, net, optimizer, mov,probs=None):
         net.train()
         for batch_idx, (inputs, targets, idx) in enumerate(
             tqdm(self.train_loader, desc=f"Epoch: {epoch}")
@@ -95,29 +117,66 @@ class CIFARN_Trainer:
             onehot_labels = F.one_hot(targets, self.num_classes).cuda()
 
             optimizer.zero_grad()
+
+            # l = np.random.beta(0.5, 0.5)
+            # l = max(l, 1 - l)
+            # l = torch.ones_like(torch.from_numpy(l)) * 0.5
+            # l = 0.5
+
+            # mix_idx = torch.randperm(inputs.shape[0])
+            # mix_inputs = l * inputs + (1 - l) * inputs[mix_idx]
+            # mix_targets = l * onehot_labels + (1 - l) * onehot_labels[mix_idx]
+
             outputs, tildey, _ = net(inputs)
 
-            pred = F.one_hot(mov.sample_latent(idx).sample(), self.num_classes).float() 
+            pred = F.one_hot(mov.sample_latent(idx).sample(), self.num_classes).float()
             prior_cov = (pred + onehot_labels).clamp(max=1.0)
             # prior_cov = [torch.logical_or(pred[i], onehot_labels).float() for i in range(self.num_pri)]
 
             prior_unc = [
-                sample_neg(prior_cov, self.num_classes, probs[idx] if probs is not None else None)
+                sample_neg(
+                    prior_cov,
+                    self.num_classes,
+                    probs[idx] if probs is not None else None,
+                )
                 for i in range(self.num_pri)
             ]
-            prior = [(prior_cov + prior_unc[i]).clamp(max=1.0) for i in range(self.num_pri)]
-            prior = [prior[i] / prior[i].sum(1, keepdim=True) for i in range(self.num_pri)]
+            prior = [
+                (prior_cov + prior_unc[i]).clamp(max=1.0) for i in range(self.num_pri)
+            ]
+            prior = [
+                prior[i] / prior[i].sum(1, keepdim=True) for i in range(self.num_pri)
+            ]
+            # mix_prior = [
+            #     l * prior[i] + (1 - l) * prior[i][mix_idx] for i in range(self.num_pri)
+            # ]
+            # mix_prior = [
+            #     mix_prior[i] / mix_prior[i].sum(1, keepdim=True)
+            #     for i in range(self.num_pri)
+            # ]
 
             mov.update_hist(outputs.softmax(1), idx)
             log_outputs = outputs.log_softmax(1)
             log_prior = [prior[i].clamp(1e-9).log() for i in range(self.num_pri)]
+            # mix_log_prior = [mix_prior[i].clamp(1e-9).log() for i in range(self.num_pri)]
             # log_tildey = tildey.log_softmax(1)
             ce = self.criterion(tildey, targets).mean()
+            # ce = -torch.mean(
+            #     torch.sum(F.log_softmax(tildey, dim=1) * mix_targets, dim=1)
+            # )
             pri = (
-                sum([prior_loss(log_outputs, log_prior[i]) for i in range(self.num_pri)]) / self.num_pri
+                sum(
+                    [prior_loss(log_outputs, log_prior[i]) for i in range(self.num_pri)]
+                )
+                / self.num_pri
             )
             reg_kl = (
-                sum([self.reg_kl(log_outputs, tildey, log_prior[i]) for i in range(self.num_pri)])
+                sum(
+                    [
+                        self.reg_kl(log_outputs, tildey, log_prior[i])
+                        for i in range(self.num_pri)
+                    ]
+                )
                 / self.num_pri
             )
             l = ce + pri + reg_kl
@@ -125,7 +184,9 @@ class CIFARN_Trainer:
             l.backward()
             optimizer.step()
 
-            self.metrics_update(inputs, clean, targets, prior[0], prior_cov, ce, pri, reg_kl)
+            self.metrics_update(
+                inputs, clean, targets, prior[0], prior_cov, ce, pri, reg_kl
+            )
             self.train_acc.update(self.calc_acc(outputs, clean.int()).item() * 100.0)
 
     @torch.no_grad()
@@ -135,7 +196,7 @@ class CIFARN_Trainer:
         for batch_idx, (inputs, targets, index) in enumerate(self.eval_loader):
             inputs, targets = inputs.cuda(), targets.cuda()
             outputs, tildey, _ = net(inputs)
-            loss = F.cross_entropy(outputs, targets, reduction="none")
+            loss = F.cross_entropy(tildey, targets, reduction="none")
             for b in range(inputs.size(0)):
                 losses[index[b]] = loss[b]
         losses = ((losses - losses.min()) / (losses.max() - losses.min())).unsqueeze(1)
@@ -150,14 +211,19 @@ class CIFARN_Trainer:
     @torch.no_grad()
     def test(self, net):
         net.eval()
+        # net2.eval()
         for batch_idx, (inputs, targets) in enumerate(self.test_loader):
             inputs, targets = inputs.cuda(), targets.cuda()
             outputs, _, _ = net(inputs)
+            # outputs2, _, _ = net2(inputs)
+            # outputs = outputs
             self.test_acc.update(self.calc_acc(outputs, targets.int()).item() * 100.0)
 
     def metrics_update(self, inputs, clean, targets, prior, prior_cov, ce, pri, reg_kl):
         self.m_cov.update(
-            torch.logical_and(prior * prior_cov, F.one_hot(clean, self.num_classes)).sum().item(),
+            torch.logical_and(prior * prior_cov, F.one_hot(clean, self.num_classes))
+            .sum()
+            .item(),
             inputs.shape[0],
         )
         clean_index = targets == clean
