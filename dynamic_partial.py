@@ -38,13 +38,18 @@ def sample_neg(prior_cov, num_classes, num=None):
                 torch.tensor(
                     np.random.choice(
                         num_classes,
+                        # int(
+                        #     torch.round(num[i] * num_classes - (probs[i] == 0).sum())
+                        #     .clamp(min=0.0, max=num_classes)
+                        #     .item()
+                        # )
                         int(
-                            torch.round(num[i] * (probs[i] > 0).sum())
+                            torch.round(num[i] * ((probs[i] > 0).sum() - 1))
                             .clamp(min=0.0, max=num_classes)
                             .item()
                         )
-                        # int(num[i].item())
-                        if num is not None else np.random.randint(0, num_classes - 1, dtype=np.uint8),
+                        if num is not None
+                        else np.random.randint(0, num_classes - 2, dtype=np.uint8),
                         replace=False,
                         p=probs[i],
                     )
@@ -54,10 +59,14 @@ def sample_neg(prior_cov, num_classes, num=None):
             for i in range(probs.shape[0])
         ]
     ).cuda()
+    neg[neg > 1] = 1
 
     return neg
 
 
+#! Two approaches for Eq. 12
+#! Option 1: log_outputs.softmax(0)
+#! Option 2: log_outputs / log_outputs.sum(0,keepdim=True), logsumexp is used for computing in log space
 def prior_loss(log_outputs, log_prior):
     return F.kl_div(
         log_outputs,
