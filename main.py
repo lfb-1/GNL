@@ -11,11 +11,12 @@ import random
 parser = argparse.ArgumentParser(description="PyTorch CIFAR Training")
 parser.add_argument("--name", type=str)
 parser.add_argument("--r", default=0.5, type=float)
-parser.add_argument("--root", default="/media/hdd/fb/cifar-10-batches-py", type=str)
+parser.add_argument(
+    "--root", default="/home/fbl/Documents/Data/cifar-10-batches-py/", type=str)
 parser.add_argument("--seed", default=42, type=int)
 parser.add_argument("--desc", default="baseline", type=str)
 parser.add_argument("--config", default="cifar10", type=str)
-parser.add_argument('--optim_goal',default='pxy',type=str)
+parser.add_argument('--optim_goal', default='pxy', type=str)
 args = parser.parse_args()
 
 random.seed(args.seed)
@@ -31,7 +32,7 @@ if args.config == "cifar10":
     config = cifar10_configs(args.r, args.root, args.optim_goal)
     trainer = CIFAR_Trainer(config, args.desc)
 elif args.config == "cifar100":
-    config = cifar100_configs(args.r, args.root,args.optim_goal)
+    config = cifar100_configs(args.r, args.root, args.optim_goal)
     trainer = CIFAR_Trainer(config, args.desc)
 elif args.config == "red":
     config = red_configs(args.r, args.root, args.optim_goal)
