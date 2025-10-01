@@ -17,6 +17,7 @@ import torch.distributions as dist
 
 # from torchsort import soft_rank, soft_sort
 import numpy as np
+from collections import deque
 
 
 class CIFARN_Trainer:
@@ -28,9 +29,8 @@ class CIFARN_Trainer:
         self.beta = config.beta
         self.reg_kl = pxy_kl if config.optim_goal == "pxy" else pyx_kl
 
-        self.net, self.optim, self.latent, self.scheduler = self.net_optim_sch_mov(
-            config
-        )
+        self.net, self.optim, self.latent, self.scheduler = self.net_optim_sch_mov(config)
+        self.memory_queue_len = config.memory_queue_len
         # self.net2, self.optim2, self.latent2, self.scheduler2 = self.net_optim_sch_mov(
         #     config
         # )
@@ -47,7 +47,7 @@ class CIFARN_Trainer:
         if config.wandb:
             self.use_wandb = True
             wandb.login()
-            wandb.init(project="GNL", config=config, name=name)
+            wandb.init(project="GNL_new", config=config, name=name)
         else:
             self.use_wandb = False
         self.logger = pd.DataFrame(
@@ -69,9 +69,7 @@ class CIFARN_Trainer:
         self.l_pri = AverageMeter()
         self.l_kl = AverageMeter()
         self.test_acc = AverageMeter()
-        self.calc_acc = tm.Accuracy(
-            task="multiclass", num_classes=config.num_classes
-        ).cuda()
+        self.calc_acc = tm.Accuracy(task="multiclass", num_classes=config.num_classes).cuda()
 
     def net_optim_sch_mov(self, config):
         net = resnet_cifar34(self.num_classes).cuda()
@@ -83,12 +81,14 @@ class CIFARN_Trainer:
             nesterov=config.nesterov,
         )
         latent = DynamicPartial(50000, config.beta, config.num_classes)
-        scheduler = optim.lr_scheduler.MultiStepLR(
-            optimizer, milestones=config.lr_decay, gamma=0.1
-        )
+        scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=config.lr_decay, gamma=0.1)
         return net, optimizer, latent, scheduler
 
     def pipeline(self, train_func):
+        if self.memory_queue_len > 0:
+            memory_queue = deque(maxlen=self.memory_queue_len)
+        else:
+            memory_queue = None
         for epoch in range(self.total_epochs):
             if epoch < self.warmup_epochs:
                 self.train(epoch, self.net, self.optim, self.latent)
@@ -96,7 +96,8 @@ class CIFARN_Trainer:
             else:
                 probs = self.eval_train(self.net)
                 # probs2 = self.eval_train(self.net2)
-                self.train(epoch, self.net, self.optim, self.latent, probs)
+                # self.train(epoch, self.net, self.optim, self.latent, probs)
+                self.train(epoch, self.net, self.optim, self.latent, probs, memory_queue=memory_queue)
                 # self.train(epoch, self.net2, self.optim2, self.latent2,self.latent, probs)
 
             self.test(self.net)
@@ -104,11 +105,9 @@ class CIFARN_Trainer:
             self.scheduler.step()
             # self.scheduler2.step()
 
-    def train(self, epoch, net, optimizer, mov,probs=None):
+    def train(self, epoch, net, optimizer, mov, probs=None, memory_queue=None):
         net.train()
-        for batch_idx, (inputs, targets, idx) in enumerate(
-            tqdm(self.train_loader, desc=f"Epoch: {epoch}")
-        ):
+        for batch_idx, (inputs, targets, idx) in enumerate(tqdm(self.train_loader, desc=f"Epoch: {epoch}")):
             inputs, targets, clean = (
                 inputs.cuda(),
                 targets.cuda(),
@@ -141,12 +140,13 @@ class CIFARN_Trainer:
                 )
                 for i in range(self.num_pri)
             ]
-            prior = [
-                (prior_cov + prior_unc[i]).clamp(max=1.0) for i in range(self.num_pri)
-            ]
-            prior = [
-                prior[i] / prior[i].sum(1, keepdim=True) for i in range(self.num_pri)
-            ]
+            prior = [(prior_cov + prior_unc[i]).clamp(max=1.0) for i in range(self.num_pri)]
+            # Add numerical stability to prior normalization
+            for i in range(self.num_pri):
+                prior_sum = prior[i].sum(1, keepdim=True)
+                # Avoid division by zero or very small numbers
+                prior_sum = torch.clamp(prior_sum, min=1e-8)
+                prior[i] = prior[i] / prior_sum
             # mix_prior = [
             #     l * prior[i] + (1 - l) * prior[i][mix_idx] for i in range(self.num_pri)
             # ]
@@ -157,23 +157,39 @@ class CIFARN_Trainer:
 
             mov.update_hist(outputs.softmax(1), idx)
             log_outputs = outputs.log_softmax(1)
-            log_prior = [prior[i].clamp(1e-9).log() for i in range(self.num_pri)]
+            # Add numerical stability to log_prior computation
+            log_prior = [torch.clamp(prior[i], min=1e-9, max=1.0).log() for i in range(self.num_pri)]
+
+            if memory_queue is None:
+                extended_log_outputs = log_outputs
+            else:
+                if len(memory_queue) == memory_queue.maxlen:
+                    # Queue is full, pop the oldest
+                    prev_log_outputs = memory_queue.popleft()
+                    # Add numerical stability for concatenation
+                    extended_log_outputs = torch.cat([log_outputs, prev_log_outputs], dim=0)
+                elif len(memory_queue) == 0:
+                    extended_log_outputs = log_outputs
+                else:
+                    # Queue is not full, use all previous batches
+                    all_prev_outputs = torch.cat(list(memory_queue), dim=0)
+                    extended_log_outputs = torch.cat([log_outputs, all_prev_outputs], dim=0)
+
+                # Apply stability clipping to the extended outputs
+                extended_log_outputs = torch.clamp(extended_log_outputs, min=-50.0, max=50.0)
+                memory_queue.append(torch.clamp(log_outputs.detach(), min=-50.0, max=50.0))
+
             # mix_log_prior = [mix_prior[i].clamp(1e-9).log() for i in range(self.num_pri)]
             # log_tildey = tildey.log_softmax(1)
             ce = self.criterion(tildey, targets).mean()
             # ce = -torch.mean(
             #     torch.sum(F.log_softmax(tildey, dim=1) * mix_targets, dim=1)
             # )
-            pri = (
-                sum(
-                    [prior_loss(log_outputs, log_prior[i]) for i in range(self.num_pri)]
-                )
-                / self.num_pri
-            )
+            pri = sum([prior_loss([log_outputs, extended_log_outputs], log_prior[i]) for i in range(self.num_pri)]) / self.num_pri
             reg_kl = (
                 sum(
                     [
-                        self.reg_kl(log_outputs, tildey, log_prior[i])
+                        self.reg_kl([log_outputs, extended_log_outputs], tildey, log_prior[i], 0.5 if probs is None else 1.0 - probs[idx])
                         for i in range(self.num_pri)
                     ]
                 )
@@ -182,11 +198,13 @@ class CIFARN_Trainer:
             l = ce + pri + reg_kl
 
             l.backward()
+
+            # Gradient clipping to prevent exploding gradients
+            # torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=1.0)
+
             optimizer.step()
 
-            self.metrics_update(
-                inputs, clean, targets, prior[0], prior_cov, ce, pri, reg_kl
-            )
+            self.metrics_update(inputs, clean, targets, prior[0], prior_cov, ce, pri, reg_kl)
             self.train_acc.update(self.calc_acc(outputs, clean.int()).item() * 100.0)
 
     @torch.no_grad()
@@ -196,17 +214,46 @@ class CIFARN_Trainer:
         for batch_idx, (inputs, targets, index) in enumerate(self.eval_loader):
             inputs, targets = inputs.cuda(), targets.cuda()
             outputs, tildey, _ = net(inputs)
-            loss = F.cross_entropy(tildey, targets, reduction="none")
+            loss = F.cross_entropy(outputs, targets, reduction="none")
             for b in range(inputs.size(0)):
                 losses[index[b]] = loss[b]
-        losses = ((losses - losses.min()) / (losses.max() - losses.min())).unsqueeze(1)
+
+        # Handle potential NaN/Inf values in losses
+        losses = torch.where(torch.isnan(losses) | torch.isinf(losses), torch.zeros_like(losses), losses)
+
+        # More robust normalization that handles edge cases
+        losses_min = losses.min()
+        losses_max = losses.max()
+        losses_range = losses_max - losses_min
+
+        if losses_range == 0 or torch.isnan(losses_range) or torch.isinf(losses_range):
+            # If all losses are the same or problematic, return uniform probabilities
+            return torch.ones(50000, device=losses.device) * 0.5
+
+        losses = ((losses - losses_min) / losses_range).unsqueeze(1)
         input_loss = losses.reshape(-1, 1)
+
+        # Convert to numpy for sklearn, with additional safety checks
+        input_loss_np = input_loss.cpu().numpy().astype(np.float64)
+
+        # Check for any remaining NaN/Inf values
+        if np.any(np.isnan(input_loss_np)) or np.any(np.isinf(input_loss_np)):
+            print("[WARNING] Input loss contains NaN/Inf after preprocessing!")
+            return torch.ones(50000, device=losses.device) * 0.5
+
         # fit a two-component GMM to the loss
-        gmm = GaussianMixture(n_components=2, max_iter=20, tol=1e-2, reg_covar=5e-4)
-        gmm.fit(input_loss)
-        prob = gmm.predict_proba(input_loss)
-        prob = prob[:, gmm.means_.argmin()]
-        return 1 - torch.from_numpy(prob).cuda()
+        try:
+            gmm = GaussianMixture(n_components=2, max_iter=20, tol=1e-2, reg_covar=5e-4)
+            gmm.fit(input_loss_np)
+            prob = gmm.predict_proba(input_loss_np)
+            prob = prob[:, np.argmin(gmm.means_)]
+            return 1 - torch.from_numpy(prob).cuda()
+        except Exception as e:
+            print(f"[WARNING] GMM fitting failed: {e}")
+            # Fallback to simple threshold-based approach
+            threshold = input_loss_np.mean()
+            prob = (input_loss_np.flatten() < threshold).astype(np.float32)
+            return torch.from_numpy(prob).cuda()
 
     @torch.no_grad()
     def test(self, net):
@@ -221,9 +268,7 @@ class CIFARN_Trainer:
 
     def metrics_update(self, inputs, clean, targets, prior, prior_cov, ce, pri, reg_kl):
         self.m_cov.update(
-            torch.logical_and(prior * prior_cov, F.one_hot(clean, self.num_classes))
-            .sum()
-            .item(),
+            torch.logical_and(prior * prior_cov, F.one_hot(clean, self.num_classes)).sum().item(),
             inputs.shape[0],
         )
         clean_index = targets == clean

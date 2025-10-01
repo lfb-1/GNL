@@ -4,7 +4,7 @@ from train_red import RED_Trainer
 # from train_cifarN_cot import CIFARN_Trainer
 from train_cifarN import CIFARN_Trainer
 from train_animal10n import ANIMAL_Trainer
-from train_clothing import C1M_Trainer
+# from train_clothing import C1M_Trainer
 from configs import *
 import argparse
 import torch
@@ -15,7 +15,8 @@ import random
 parser = argparse.ArgumentParser(description="PyTorch CIFAR Training")
 parser.add_argument("--name", type=str)
 parser.add_argument("--r", default=0.5, type=float)
-parser.add_argument("--root", default="/media/hdd/fb/cifar-10-batches-py", type=str)
+parser.add_argument(
+    "--root", default="/home/fbl/Documents/Data/cifar-10-batches-py/", type=str)
 parser.add_argument("--seed", default=42, type=int)
 parser.add_argument("--desc", default="baseline", type=str)
 parser.add_argument("--config", default="cifar10", type=str)
@@ -26,12 +27,13 @@ parser.add_argument(
 parser.add_argument("--cot", default=1, type=int, help="use coteaching")
 args = parser.parse_args()
 
-# random.seed(args.seed)
-# np.random.seed(args.seed)
-# torch.manual_seed(args.seed)
-# torch.cuda.manual_seed_all(args.seed)
-# torch.backends.cudnn.benchmark = False
-# torch.backends.cudnn.deterministic = True
+random.seed(args.seed)
+np.random.seed(args.seed)
+torch.manual_seed(args.seed)
+torch.cuda.manual_seed_all(args.seed)
+torch.backends.cudnn.benchmark = False
+torch.backends.cudnn.deterministic = True
+# torch.autograd.set_detect_anomaly(True)
 
 # for i in [0.2,0.3,0.4,0.5,0.6]:
 print(f"Optimize in {args.optim_goal}")

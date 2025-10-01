@@ -20,6 +20,7 @@ def cifar10_configs(r, root_dir, optim_goal="pxy"):
     config["lr_decay"] = [100]
     config["num_prior"] = 1
     config["optim_goal"] = optim_goal
+    config["memory_queue_len"] = 3
     return EasyDict(config)
 
 
@@ -42,6 +43,7 @@ def cifar100_configs(r, root_dir, optim_goal="pxy"):
     config["lr_decay"] = [100]
     config["num_prior"] = 1
     config["optim_goal"] = optim_goal
+    config["memory_queue_len"] = 10
     return EasyDict(config)
 
 
@@ -70,7 +72,7 @@ def red_configs(r, root_dir, optim_goal="pxy"):
 def cifar10n_configs(target, root_dir, optim_goal="pxy"):
     config = {}
     config["warmup_epochs"] = 10
-    config["total_epochs"] = 120 #300
+    config["total_epochs"] = 150  # 300
     config["lr"] = 0.02
     config["wd"] = 5e-4
     config["nesterov"] = False
@@ -84,16 +86,17 @@ def cifar10n_configs(target, root_dir, optim_goal="pxy"):
     config["num_classes"] = 10
     config["wandb"] = True
     config["beta"] = 0.9
-    config["lr_decay"] = [80] # 150/250
+    config["lr_decay"] = [100]  # 150/250
     config["num_prior"] = 1
     config["optim_goal"] = optim_goal
+    config["memory_queue_len"] = 1
     return EasyDict(config)
 
 
 def cifar100n_configs(target, root_dir, optim_goal="pxy"):
     config = {}
     config["warmup_epochs"] = 15
-    config["total_epochs"] = 300
+    config["total_epochs"] = 150
     config["lr"] = 0.02
     config["wd"] = 5e-4
     config["nesterov"] = False
@@ -107,9 +110,10 @@ def cifar100n_configs(target, root_dir, optim_goal="pxy"):
     config["num_classes"] = 100
     config["wandb"] = True
     config["beta"] = 0.9
-    config["lr_decay"] = [150,250]
+    config["lr_decay"] = [100]
     config["num_prior"] = 1
     config["optim_goal"] = optim_goal
+    config["memory_queue_len"] = 1
     return EasyDict(config)
 
 
@@ -135,6 +139,7 @@ def animal_configs(root_dir, cot=1, optim_goal="pxy"):
     config["num_prior"] = 1
     config["optim_goal"] = optim_goal
     return EasyDict(config)
+
 
 def c1m_configs(root_dir, optim_goal="pxy"):
     config = {}
