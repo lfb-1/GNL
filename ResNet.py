@@ -58,6 +58,7 @@ class ResNetCIFAR(nn.Module):
         self.layer4 = self._make_layer(block, 512, num_blocks[3], stride=2)
         self.linear = nn.Linear(512 * block.expansion, num_classes)
         self.transition = nn.Linear(num_classes + 512, num_classes)
+        # self.reverse_transition = nn.Linear(num_classes + 512, num_classes)
 
     def _make_layer(self, block, planes, num_blocks, stride):
         strides = [stride] + [1] * (num_blocks - 1)
@@ -82,7 +83,22 @@ class ResNetCIFAR(nn.Module):
 
         tildey = self.transition(torch.cat((feat, out.detach()), dim=1))
 
+        # y = self.reverse_transition(torch.cat((feat, noise_y),dim=1))
+
         return out, tildey, None
+
+    def forward_test(self,x):
+        out = F.relu(self.bn1(self.conv1(x)))
+        out = self.layer1(out)
+        out = self.layer2(out)
+        out = self.layer3(out)
+        out = self.layer4(out)
+        out = F.avg_pool2d(out, 4)
+        feat = out.view(out.size(0), -1)
+        out = self.linear(feat)
+        return out
+
+
 
 
 def resnet_cifar34(num_classes):

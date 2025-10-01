@@ -4,7 +4,7 @@ from train_red import RED_Trainer
 # from train_cifarN_cot import CIFARN_Trainer
 from train_cifarN import CIFARN_Trainer
 from train_animal10n import ANIMAL_Trainer
-from train_clothing import C1M_Trainer
+# from train_clothing import C1M_Trainer
 from configs import *
 import argparse
 import torch
@@ -27,12 +27,13 @@ parser.add_argument(
 parser.add_argument("--cot", default=1, type=int, help="use coteaching")
 args = parser.parse_args()
 
-# random.seed(args.seed)
-# np.random.seed(args.seed)
-# torch.manual_seed(args.seed)
-# torch.cuda.manual_seed_all(args.seed)
-# torch.backends.cudnn.benchmark = False
-# torch.backends.cudnn.deterministic = True
+random.seed(args.seed)
+np.random.seed(args.seed)
+torch.manual_seed(args.seed)
+torch.cuda.manual_seed_all(args.seed)
+torch.backends.cudnn.benchmark = False
+torch.backends.cudnn.deterministic = True
+# torch.autograd.set_detect_anomaly(True)
 
 # for i in [0.2,0.3,0.4,0.5,0.6]:
 print(f"Optimize in {args.optim_goal}")
