@@ -7,17 +7,15 @@ import torch.nn as nn
 import dataloader_red as dataloader
 import wandb
 import pandas as pd
-from helper import AverageMeter
+from helper import AverageMeter, LossWeightEstimator
 import torchmetrics as tm
 from tqdm import tqdm
 import torch.nn.functional as F
 from dynamic_partial import DynamicPartial, sample_neg, prior_loss, pxy_kl, pyx_kl
 from easydict import EasyDict
-from sklearn.mixture import GaussianMixture
 import torch.distributions as dist
 
 # from torchsort import soft_rank, soft_sort
-import numpy as np
 
 
 class RED_Trainer:
@@ -55,6 +53,14 @@ class RED_Trainer:
 
         self.train_loader = loader.run("warmup")
         self.eval_loader = loader.run("eval_train")
+        self.num_samples = len(self.eval_loader.dataset)
+        self.clean_estimator = LossWeightEstimator(
+            self.num_samples,
+            momentum=getattr(config, "gmm_momentum", 0.9),
+            temperature=1.0,
+        )
+        self.gmm_target_temperature = getattr(config, "gmm_temperature", 1.0)
+        self.gmm_transition_epochs = getattr(config, "gmm_transition_epochs", 5)
         self.latent = DynamicPartial(
             len(self.eval_loader.dataset.train_imgs), config.beta, config.num_classes
         )
@@ -96,12 +102,32 @@ class RED_Trainer:
             if epoch < self.warmup_epochs:
                 self.train(epoch, self.net, self.optim, self.latent)
             else:
+                alpha = self._transition_alpha(epoch)
+                self._update_temperature(alpha)
                 probs = self.eval_train(self.net)
+                probs = self._blend_probs(probs, alpha)
                 self.train(epoch, self.net, self.optim, self.latent, probs)
 
             self.test(self.net)
             self.wandb_update(epoch)
             self.scheduler.step()
+
+    def _transition_alpha(self, epoch: int) -> float:
+        if self.gmm_transition_epochs <= 0:
+            return 1.0
+        progress = epoch - self.warmup_epochs + 1
+        if progress <= 0:
+            return 0.0
+        return float(min(1.0, progress / self.gmm_transition_epochs))
+
+    def _update_temperature(self, alpha: float) -> None:
+        current = 1.0 + alpha * (self.gmm_target_temperature - 1.0)
+        self.clean_estimator.temperature = max(1e-3, current)
+
+    def _blend_probs(self, probs: torch.Tensor, alpha: float) -> torch.Tensor:
+        if alpha >= 1.0:
+            return probs
+        return probs * alpha + torch.full_like(probs, 0.5) * (1.0 - alpha)
 
     def train(
         self,
@@ -130,7 +156,7 @@ class RED_Trainer:
             ]
             # prior_cov = [torch.logical_or(pred[i], onehot_labels).float() for i in range(self.num_pri)]
 
-            prior_unc = [
+            prior = [
                 sample_neg(
                     prior_cov[i],
                     self.num_classes,
@@ -138,13 +164,7 @@ class RED_Trainer:
                 )
                 for i in range(self.num_pri)
             ]
-            prior = [
-                (prior_cov[i] + prior_unc[i]).clamp(max=1.0)
-                for i in range(self.num_pri)
-            ]
-            prior = [
-                prior[i] / prior[i].sum(1, keepdim=True) for i in range(self.num_pri)
-            ]
+            prior = [prior[i] / prior[i].sum(1, keepdim=True) for i in range(self.num_pri)]
 
             mov.update_hist(outputs.softmax(1), idx)
 
@@ -178,25 +198,20 @@ class RED_Trainer:
     @torch.no_grad()
     def eval_train(self, net: nn.Module, num_classes=100):
         net.eval()
-        losses = torch.zeros(len(self.eval_loader.dataset.train_imgs))
+        losses = torch.zeros(self.num_samples)
+        confidences = torch.zeros(self.num_samples)
         for batch_idx, (inputs, targets, index) in enumerate(self.eval_loader):
             inputs, targets = inputs.cuda(), targets.cuda()
-            outputs, tildey, _ = net(inputs)
-            # loss = F.kl_div(outputs.log_softmax(1),tildey.log_softmax(1),reduction='none',log_target=True).sum(1)
+            outputs, _, _ = net(inputs)
             loss = F.cross_entropy(outputs, targets, reduction="none")
-            # loss = -torch.sum(
-            #     outputs.softmax(1) * F.one_hot(targets, num_classes).float().clamp(min=1e-9).log(), dim=1
-            # )
-            for b in range(inputs.size(0)):
-                losses[index[b]] = loss[b]
-        losses = ((losses - losses.min()) / (losses.max() - losses.min())).unsqueeze(1)
-        input_loss = losses.reshape(-1, 1)
-        # fit a two-component GMM to the loss
-        gmm = GaussianMixture(n_components=2, max_iter=20, tol=1e-2, reg_covar=5e-4)
-        gmm.fit(input_loss)
-        prob = gmm.predict_proba(input_loss)
-        prob = prob[:, gmm.means_.argmin()]
-        return 1 - torch.from_numpy(prob).cuda()
+            conf = outputs.softmax(1).gather(1, targets.unsqueeze(1)).squeeze(1)
+            losses[index] = loss.detach().cpu()
+            confidences[index] = conf.detach().cpu()
+
+        self.clean_estimator.update(losses, confidences)
+        clean_prob = self.clean_estimator.predict_clean_probability()
+        noisy_prob = (1.0 - clean_prob).clamp(1e-4, 1.0 - 1e-4)
+        return noisy_prob.cuda()
 
     @torch.no_grad()
     def test(self, net):

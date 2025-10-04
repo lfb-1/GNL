@@ -89,7 +89,7 @@ def cifar10n_configs(target, root_dir, optim_goal="pxy"):
     config["lr_decay"] = [100]  # 150/250
     config["num_prior"] = 1
     config["optim_goal"] = optim_goal
-    config["memory_queue_len"] = 1
+    config["memory_queue_len"] = 3
     return EasyDict(config)
 
 
@@ -113,7 +113,7 @@ def cifar100n_configs(target, root_dir, optim_goal="pxy"):
     config["lr_decay"] = [100]
     config["num_prior"] = 1
     config["optim_goal"] = optim_goal
-    config["memory_queue_len"] = 1
+    config["memory_queue_len"] = 3
     return EasyDict(config)
 
 

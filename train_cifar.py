@@ -5,13 +5,12 @@ import torch.nn as nn
 from dataloader_cifar import cifar_dataloader
 import wandb
 import pandas as pd
-from helper import AverageMeter
+from helper import AverageMeter, LossWeightEstimator
 import torchmetrics as tm
 from tqdm import tqdm
 import torch.nn.functional as F
 from dynamic_partial import DynamicPartial, sample_neg, prior_loss, pxy_kl, pyx_kl
 from easydict import EasyDict
-from sklearn.mixture import GaussianMixture
 import torch.distributions as dist
 
 # from torchsort import soft_rank, soft_sort
@@ -53,6 +52,14 @@ class CIFAR_Trainer:
 
         self.train_loader, self.eval_loader = loader.run("train")
         self.test_loader = loader.run("test")
+        self.num_samples = len(self.train_loader.dataset)
+        self.clean_estimator = LossWeightEstimator(
+            self.num_samples,
+            momentum=getattr(config, "gmm_momentum", 0.9),
+            temperature=1.0,
+        )
+        self.gmm_target_temperature = getattr(config, "gmm_temperature", 1.0)
+        self.gmm_transition_epochs = getattr(config, "gmm_transition_epochs", 5)
         if config.wandb:
             self.use_wandb = True
             wandb.login()
@@ -74,6 +81,7 @@ class CIFAR_Trainer:
         self.l_kl = AverageMeter()
         self.test_acc = AverageMeter()
         self.calc_acc = tm.Accuracy(task="multiclass", num_classes=config.num_classes).cuda()
+        self.queue_depth = AverageMeter()
 
     def pipeline(self, train_func):
         if self.memory_queue_len > 0:
@@ -84,12 +92,34 @@ class CIFAR_Trainer:
             if epoch < self.warmup_epochs:
                 self.train(epoch, self.net, self.optim, self.latent)
             else:
+                alpha = self._transition_alpha(epoch)
+                self._update_temperature(alpha)
                 probs = self.eval_train(self.net)
+                probs = self._blend_probs(probs, alpha)
                 self.train(epoch, self.net, self.optim, self.latent, probs, memory_queue=memory_queue)
 
             self.test(self.net)
             self.wandb_update(epoch)
             self.scheduler.step()
+
+    def _transition_alpha(self, epoch: int) -> float:
+        if self.gmm_transition_epochs <= 0:
+            return 1.0
+        progress = epoch - self.warmup_epochs + 1
+        if progress <= 0:
+            return 0.0
+        return float(min(1.0, progress / self.gmm_transition_epochs))
+
+    def _update_temperature(self, alpha: float) -> None:
+        target = self.gmm_target_temperature
+        current = 1.0 + alpha * (target - 1.0)
+        self.clean_estimator.temperature = max(1e-3, current)
+
+    def _blend_probs(self, probs: torch.Tensor, alpha: float) -> torch.Tensor:
+        if alpha >= 1.0:
+            return probs
+        uniform = torch.full_like(probs, 0.5)
+        return probs * alpha + uniform * (1.0 - alpha)
 
     def train(self, epoch: int, net: nn.Module, optimizer: optim.SGD, mov: DynamicPartial, probs=None, memory_queue=None):
         net.train()
@@ -102,8 +132,14 @@ class CIFAR_Trainer:
 
             pred = [F.one_hot(mov.sample_latent(idx).sample(), self.num_classes).float() for i in range(self.num_pri)]
             prior_cov = [(pred[i] + onehot_labels).clamp(max=1.0) for i in range(self.num_pri)]
-            prior_unc = [sample_neg(prior_cov[i], self.num_classes, probs[idx] if probs is not None else None) for i in range(self.num_pri)]
-            prior = [(prior_cov[i] + prior_unc[i]).clamp(max=1.0) for i in range(self.num_pri)]
+            prior = [
+                sample_neg(
+                    prior_cov[i],
+                    self.num_classes,
+                    probs[idx] if probs is not None else None,
+                )
+                for i in range(self.num_pri)
+            ]
             prior = [prior[i] / prior[i].sum(1, keepdim=True) for i in range(self.num_pri)]
 
             mov.update_hist(outputs.softmax(1), idx)
@@ -114,18 +150,19 @@ class CIFAR_Trainer:
 
             if memory_queue is None:
                 extended_log_outputs = log_outputs
+                queue_depth = 0
             else:
-                if len(memory_queue) == memory_queue.maxlen:
-                    # Queue is full, pop the oldest
-                    prev_log_outputs = memory_queue.popleft()
-                    extended_log_outputs = torch.cat([log_outputs, prev_log_outputs], dim=0)
-                elif len(memory_queue) == 0:
+                history_depth = len(memory_queue)
+                if history_depth == 0:
                     extended_log_outputs = log_outputs
                 else:
-                    # Queue is not full, use all previous batches
-                    all_prev_outputs = torch.cat(list(memory_queue), dim=0)
-                    extended_log_outputs = torch.cat([log_outputs, all_prev_outputs], dim=0)
+                    # Include all stored history so memory_queue_len controls context span.
+                    extended_log_outputs = torch.cat([log_outputs] + list(memory_queue), dim=0)
+                # deque(maxlen=...) drops the oldest entry automatically, so append after use.
                 memory_queue.append(log_outputs.detach())
+                queue_depth = history_depth
+
+            self.queue_depth.update(queue_depth)
 
             ce = self.criterion(tildey, targets).mean()
             pri = sum([prior_loss([log_outputs, extended_log_outputs], log_prior[i]) for i in range(self.num_pri)]) / self.num_pri
@@ -152,32 +189,26 @@ class CIFAR_Trainer:
     @torch.no_grad()
     def eval_train(self, net: nn.Module, num_classes=100):
         net.eval()
-        losses = torch.zeros(50000)
+        losses = torch.zeros(self.num_samples)
+        confidences = torch.zeros(self.num_samples)
         for batch_idx, (inputs, targets, clean, index) in enumerate(self.eval_loader):
             inputs, targets = inputs.cuda(), targets.cuda()
             outputs = net.forward_test(inputs)
-            # loss = F.kl_div(outputs.log_softmax(1),tildey.log_softmax(1),reduction='none',log_target=True).sum(1)
             loss = F.cross_entropy(outputs, targets, reduction="none")
-            # loss = -torch.sum(
-            #     outputs.softmax(1) * F.one_hot(targets, num_classes).float().clamp(min=1e-9).log(), dim=1
-            # )
-            for b in range(inputs.size(0)):
-                losses[index[b]] = loss[b]
-        losses = ((losses - losses.min()) / (losses.max() - losses.min())).unsqueeze(1)
-        input_loss = losses.reshape(-1, 1)
-        # fit a two-component GMM to the loss
-        gmm = GaussianMixture(n_components=2, max_iter=20, tol=1e-2, reg_covar=5e-4)
-        gmm.fit(input_loss)
-        prob = gmm.predict_proba(input_loss)
-        prob = prob[:, gmm.means_.argmin()]
-        return 1 - torch.from_numpy(prob).cuda()
+            conf = outputs.softmax(1).gather(1, targets.unsqueeze(1)).squeeze(1)
+            losses[index] = loss.detach().cpu()
+            confidences[index] = conf.detach().cpu()
+
+        self.clean_estimator.update(losses, confidences)
+        clean_prob = self.clean_estimator.predict_clean_probability()
+        noisy_prob = (1.0 - clean_prob).clamp(1e-4, 1.0 - 1e-4)
+        return noisy_prob.cuda()
 
     @torch.no_grad()
     def test(self, net):
         net.eval()
         for batch_idx, (inputs, targets) in enumerate(self.test_loader):
             inputs, targets = inputs.cuda(), targets.cuda()
-            # outputs, _, _ = net(inputs)
             outputs = net.forward_test(inputs)
             self.test_acc.update(self.calc_acc(outputs, targets.int()).item() * 100.0)
 
@@ -205,6 +236,7 @@ class CIFAR_Trainer:
             # "Uncertainty": self.m_unc.avg,
             "Clean Uncertainty": self.m_unc_clean.avg,
             "Noisy Uncertainty": self.m_unc_noisy.avg,
+            "Memory Queue Depth": self.queue_depth.avg,
             "epoch": epoch,
             "train acc": self.train_acc.avg,
             "test acc": self.test_acc.avg,
@@ -222,5 +254,6 @@ class CIFAR_Trainer:
                 self.m_unc_clean,
                 self.train_acc,
                 self.test_acc,
+                self.queue_depth,
             ]
         ]

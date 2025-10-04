@@ -6,17 +6,15 @@ import torch.nn as nn
 from dataloader_cifarN import cifar_dataloader
 import wandb
 import pandas as pd
-from helper import AverageMeter
+from helper import AverageMeter, LossWeightEstimator
 import torchmetrics as tm
 from tqdm import tqdm
 import torch.nn.functional as F
 from dynamic_partial import DynamicPartial, sample_neg, prior_loss, pxy_kl, pyx_kl
 from easydict import EasyDict
-from sklearn.mixture import GaussianMixture
 import torch.distributions as dist
 
 # from torchsort import soft_rank, soft_sort
-import numpy as np
 from collections import deque
 
 
@@ -44,6 +42,14 @@ class CIFARN_Trainer:
         self.train_loader = loader.run("warmup", target=config.target)
         self.eval_loader = loader.run("eval_train", target=config.target)
         self.test_loader = loader.run("test")
+        self.num_samples = len(self.eval_loader.dataset)
+        self.clean_estimator = LossWeightEstimator(
+            self.num_samples,
+            momentum=getattr(config, "gmm_momentum", 0.9),
+            temperature=1.0,
+        )
+        self.gmm_target_temperature = getattr(config, "gmm_temperature", 1.0)
+        self.gmm_transition_epochs = getattr(config, "gmm_transition_epochs", 5)
         if config.wandb:
             self.use_wandb = True
             wandb.login()
@@ -94,9 +100,10 @@ class CIFARN_Trainer:
                 self.train(epoch, self.net, self.optim, self.latent)
                 # self.train(epoch, self.net2, self.optim2, self.latent2)
             else:
+                alpha = self._transition_alpha(epoch)
+                self._update_temperature(alpha)
                 probs = self.eval_train(self.net)
-                # probs2 = self.eval_train(self.net2)
-                # self.train(epoch, self.net, self.optim, self.latent, probs)
+                probs = self._blend_probs(probs, alpha)
                 self.train(epoch, self.net, self.optim, self.latent, probs, memory_queue=memory_queue)
                 # self.train(epoch, self.net2, self.optim2, self.latent2,self.latent, probs)
 
@@ -104,6 +111,23 @@ class CIFARN_Trainer:
             self.wandb_update(epoch)
             self.scheduler.step()
             # self.scheduler2.step()
+
+    def _transition_alpha(self, epoch: int) -> float:
+        if self.gmm_transition_epochs <= 0:
+            return 1.0
+        progress = epoch - self.warmup_epochs + 1
+        if progress <= 0:
+            return 0.0
+        return float(min(1.0, progress / self.gmm_transition_epochs))
+
+    def _update_temperature(self, alpha: float) -> None:
+        current = 1.0 + alpha * (self.gmm_target_temperature - 1.0)
+        self.clean_estimator.temperature = max(1e-3, current)
+
+    def _blend_probs(self, probs: torch.Tensor, alpha: float) -> torch.Tensor:
+        if alpha >= 1.0:
+            return probs
+        return probs * alpha + torch.full_like(probs, 0.5) * (1.0 - alpha)
 
     def train(self, epoch, net, optimizer, mov, probs=None, memory_queue=None):
         net.train()
@@ -140,13 +164,10 @@ class CIFARN_Trainer:
                 )
                 for i in range(self.num_pri)
             ]
-            prior = [(prior_cov + prior_unc[i]).clamp(max=1.0) for i in range(self.num_pri)]
-            # Add numerical stability to prior normalization
-            for i in range(self.num_pri):
-                prior_sum = prior[i].sum(1, keepdim=True)
-                # Avoid division by zero or very small numbers
-                prior_sum = torch.clamp(prior_sum, min=1e-8)
-                prior[i] = prior[i] / prior_sum
+            prior = [
+                torch.clamp(p, max=1.0) / torch.clamp(p.sum(1, keepdim=True), min=1e-8)
+                for p in prior_unc
+            ]
             # mix_prior = [
             #     l * prior[i] + (1 - l) * prior[i][mix_idx] for i in range(self.num_pri)
             # ]
@@ -210,50 +231,20 @@ class CIFARN_Trainer:
     @torch.no_grad()
     def eval_train(self, net: nn.Module, num_classes=100):
         net.eval()
-        losses = torch.zeros(50000)
+        losses = torch.zeros(self.num_samples)
+        confidences = torch.zeros(self.num_samples)
         for batch_idx, (inputs, targets, index) in enumerate(self.eval_loader):
             inputs, targets = inputs.cuda(), targets.cuda()
-            outputs, tildey, _ = net(inputs)
+            outputs = net.forward_test(inputs)
             loss = F.cross_entropy(outputs, targets, reduction="none")
-            for b in range(inputs.size(0)):
-                losses[index[b]] = loss[b]
+            conf = outputs.softmax(1).gather(1, targets.unsqueeze(1)).squeeze(1)
+            losses[index] = loss.detach().cpu()
+            confidences[index] = conf.detach().cpu()
 
-        # Handle potential NaN/Inf values in losses
-        losses = torch.where(torch.isnan(losses) | torch.isinf(losses), torch.zeros_like(losses), losses)
-
-        # More robust normalization that handles edge cases
-        losses_min = losses.min()
-        losses_max = losses.max()
-        losses_range = losses_max - losses_min
-
-        if losses_range == 0 or torch.isnan(losses_range) or torch.isinf(losses_range):
-            # If all losses are the same or problematic, return uniform probabilities
-            return torch.ones(50000, device=losses.device) * 0.5
-
-        losses = ((losses - losses_min) / losses_range).unsqueeze(1)
-        input_loss = losses.reshape(-1, 1)
-
-        # Convert to numpy for sklearn, with additional safety checks
-        input_loss_np = input_loss.cpu().numpy().astype(np.float64)
-
-        # Check for any remaining NaN/Inf values
-        if np.any(np.isnan(input_loss_np)) or np.any(np.isinf(input_loss_np)):
-            print("[WARNING] Input loss contains NaN/Inf after preprocessing!")
-            return torch.ones(50000, device=losses.device) * 0.5
-
-        # fit a two-component GMM to the loss
-        try:
-            gmm = GaussianMixture(n_components=2, max_iter=20, tol=1e-2, reg_covar=5e-4)
-            gmm.fit(input_loss_np)
-            prob = gmm.predict_proba(input_loss_np)
-            prob = prob[:, np.argmin(gmm.means_)]
-            return 1 - torch.from_numpy(prob).cuda()
-        except Exception as e:
-            print(f"[WARNING] GMM fitting failed: {e}")
-            # Fallback to simple threshold-based approach
-            threshold = input_loss_np.mean()
-            prob = (input_loss_np.flatten() < threshold).astype(np.float32)
-            return torch.from_numpy(prob).cuda()
+        self.clean_estimator.update(losses, confidences)
+        clean_prob = self.clean_estimator.predict_clean_probability()
+        noisy_prob = (1.0 - clean_prob).clamp(1e-4, 1.0 - 1e-4)
+        return noisy_prob.cuda()
 
     @torch.no_grad()
     def test(self, net):
@@ -261,7 +252,7 @@ class CIFARN_Trainer:
         # net2.eval()
         for batch_idx, (inputs, targets) in enumerate(self.test_loader):
             inputs, targets = inputs.cuda(), targets.cuda()
-            outputs, _, _ = net(inputs)
+            outputs = net.forward_test(inputs)
             # outputs2, _, _ = net2(inputs)
             # outputs = outputs
             self.test_acc.update(self.calc_acc(outputs, targets.int()).item() * 100.0)

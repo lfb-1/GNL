@@ -12,6 +12,12 @@ import numpy as np
 
 import random
 
+file_list = {
+    'cifar10': '/share/sablab/nfs04/users/fl453/data/cifar-10-batches-py',
+    'cifar100': '/share/sablab/nfs04/users/fl453/data/cifar-100-python',
+    'cifar10n': '/share/sablab/nfs04/users/fl453/data/cifar-10-batches-py',
+    'cifar100n': '/share/sablab/nfs04/users/fl453/data/cifar-100-python',
+}
 parser = argparse.ArgumentParser(description="PyTorch CIFAR Training")
 parser.add_argument("--name", type=str)
 parser.add_argument("--r", default=0.5, type=float)
@@ -36,21 +42,22 @@ torch.backends.cudnn.deterministic = True
 # torch.autograd.set_detect_anomaly(True)
 
 # for i in [0.2,0.3,0.4,0.5,0.6]:
+root_dir = file_list[args.config]
 print(f"Optimize in {args.optim_goal}")
 if args.config == "cifar10":
-    config = cifar10_configs(args.r, args.root, args.optim_goal)
+    config = cifar10_configs(args.r, root_dir, args.optim_goal)
     trainer = CIFAR_Trainer(config, args.desc)
 elif args.config == "cifar100":
-    config = cifar100_configs(args.r, args.root, args.optim_goal)
+    config = cifar100_configs(args.r, root_dir, args.optim_goal)
     trainer = CIFAR_Trainer(config, args.desc)
 elif args.config == "red":
     config = red_configs(args.r, args.root, args.optim_goal)
     trainer = RED_Trainer(config, args.desc)
 elif args.config == "cifar10n":
-    config = cifar10n_configs(args.target, args.root, args.optim_goal)
+    config = cifar10n_configs(args.target, root_dir, args.optim_goal)
     trainer = CIFARN_Trainer(config, args.desc)
 elif args.config == "cifar100n":
-    config = cifar100n_configs(args.target, args.root, args.optim_goal)
+    config = cifar100n_configs(args.target, root_dir, args.optim_goal)
     trainer = CIFARN_Trainer(config, args.desc)
 elif args.config == "animal":
     config = animal_configs(args.root, args.cot, args.optim_goal)

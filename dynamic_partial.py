@@ -51,30 +51,40 @@ class DynamicPartial(nn.Module):
 
 
 def sample_neg(prior_cov, num_classes, num=None):
-    probs = prior_cov.detach().cpu().numpy().astype("float64")
-    probs = (1 - probs) / (1 - probs).sum(1, keepdims=True)
-    neg = torch.vstack(
-        [
-            F.one_hot(
-                torch.tensor(
-                    np.random.choice(
-                        num_classes,
-                        (
-                            int(torch.round(num[i] * (probs[i] > 0).sum()).clamp(min=0.0, max=num_classes).item())
-                            # int(num[i].item())
-                            if num is not None
-                            else np.random.randint(0, num_classes - 1, dtype=np.uint8)
-                        ),
-                        replace=False,
-                        p=probs[i],
-                    )
-                ),
-                num_classes,
-            ).sum(0)
-            for i in range(probs.shape[0])
-        ]
-    ).cuda()
-    return neg
+    device = prior_cov.device
+    dtype = prior_cov.dtype
+
+    prior_np = prior_cov.detach().cpu().numpy()
+    num_np = None if num is None else num.detach().cpu().numpy()
+
+    merged = []
+    for i in range(prior_np.shape[0]):
+        positives = prior_np[i] > 0
+        negative_indices = np.where(~positives)[0]
+
+        if negative_indices.size == 0:
+            merged.append(torch.from_numpy(positives.astype(np.float32)))
+            continue
+
+        if negative_indices.size == 1:
+            sample_count = 0
+        else:
+            if num_np is not None:
+                desired = int(round(float(num_np[i]) * negative_indices.size))
+            else:
+                desired = np.random.randint(1, negative_indices.size)
+
+            desired = max(0, desired)
+            desired = min(desired, negative_indices.size - 1)
+            sample_count = desired
+
+        chosen = () if sample_count <= 0 else tuple(np.random.choice(negative_indices, sample_count, replace=False))
+        combined = positives.astype(np.float32)
+        if len(chosen) > 0:
+            combined[np.array(chosen)] = 1.0
+        merged.append(torch.from_numpy(combined))
+
+    return torch.stack(merged, dim=0).to(device=device, dtype=dtype)
 
 
 #! Two approaches for Eq. 12
@@ -147,6 +157,7 @@ def pxy_kl(log_outputs, tildey, log_prior, w_i=0.5):
     kl_masked = torch.where(torch.isnan(kl) | torch.isinf(kl), torch.zeros_like(kl), kl)
 
     result = ((1.0 - 2 * w_i) * kl_masked.sum(1)).mean()
+    # result = kl_masked.sum(1).mean()
 
     # Additional safety check
     if torch.isnan(result) or torch.isinf(result):

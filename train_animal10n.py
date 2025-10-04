@@ -7,13 +7,12 @@ import torch.nn as nn
 import dataloader_animal10n as dataloader
 import wandb
 import pandas as pd
-from helper import AverageMeter
+from helper import AverageMeter, LossWeightEstimator
 import torchmetrics as tm
 from tqdm import tqdm
 import torch.nn.functional as F
 from dynamic_partial import DynamicPartial, sample_neg, prior_loss, pxy_kl, pyx_kl
 from easydict import EasyDict
-from sklearn.mixture import GaussianMixture
 import torch.distributions as dist
 
 # from torchsort import soft_rank, soft_sort
@@ -52,6 +51,15 @@ class ANIMAL_Trainer:
         # self.train_loader2 = loader.run("warmup")
         self.eval_loader = loader.run("eval_train")
         self.test_loader = loader.run("test")
+        self.num_samples = len(self.eval_loader.dataset)
+        momentum = getattr(config, "gmm_momentum", 0.9)
+        self.clean_estimator = LossWeightEstimator(
+            self.num_samples,
+            momentum=momentum,
+            temperature=1.0,
+        )
+        self.gmm_target_temperature = getattr(config, "gmm_temperature", 1.0)
+        self.gmm_transition_epochs = getattr(config, "gmm_transition_epochs", 5)
         self.latent = DynamicPartial(
             len(self.eval_loader.dataset.train_data), config.beta, config.num_classes
         )
@@ -61,6 +69,13 @@ class ANIMAL_Trainer:
                 config.beta,
                 config.num_classes,
             )
+            self.clean_estimator2 = LossWeightEstimator(
+                self.num_samples,
+                momentum=momentum,
+                temperature=1.0,
+            )
+        else:
+            self.clean_estimator2 = None
         if config.wandb:
             self.use_wandb = True
             wandb.login()
@@ -119,9 +134,13 @@ class ANIMAL_Trainer:
                         epoch, self.net2, self.optim2, self.latent2, self.latent
                     )
             else:
-                probs = self.eval_train(self.net)
+                alpha = self._transition_alpha(epoch)
+                self._update_temperature(alpha)
+                probs = self.eval_train(self.net, self.clean_estimator)
+                probs = self._blend_probs(probs, alpha)
                 if self.net2 is not None:
-                    probs2 = self.eval_train(self.net2)
+                    probs2 = self.eval_train(self.net2, self.clean_estimator2)
+                    probs2 = self._blend_probs(probs2, alpha)
                     self.train(
                         epoch,
                         self.net,
@@ -138,11 +157,41 @@ class ANIMAL_Trainer:
                         self.latent,
                         probs,
                     )
+                else:
+                    self.train(
+                        epoch,
+                        self.net,
+                        self.optim,
+                        self.latent,
+                        self.latent2,
+                        probs,
+                    )
 
             self.test(self.net, net2=self.net2)
             self.wandb_update(epoch)
             self.scheduler.step()
-            self.scheduler2.step()
+            if self.net2 is not None:
+                self.scheduler2.step()
+
+    def _transition_alpha(self, epoch: int) -> float:
+        if self.gmm_transition_epochs <= 0:
+            return 1.0
+        progress = epoch - self.warmup_epochs + 1
+        if progress <= 0:
+            return 0.0
+        return float(min(1.0, progress / self.gmm_transition_epochs))
+
+    def _update_temperature(self, alpha: float) -> None:
+        current = 1.0 + alpha * (self.gmm_target_temperature - 1.0)
+        current = max(1e-3, current)
+        self.clean_estimator.temperature = current
+        if self.clean_estimator2 is not None:
+            self.clean_estimator2.temperature = current
+
+    def _blend_probs(self, probs: torch.Tensor, alpha: float) -> torch.Tensor:
+        if alpha >= 1.0:
+            return probs
+        return probs * alpha + torch.full_like(probs, 0.5) * (1.0 - alpha)
 
     def train(self, epoch, net, optimizer, mov1, mov2, probs=None):
         net.train()
@@ -164,20 +213,15 @@ class ANIMAL_Trainer:
             prior_cov = (pred + onehot_labels + pred2).clamp(max=1.0)
             # prior_cov = [torch.logical_or(pred[i], onehot_labels).float() for i in range(self.num_pri)]
 
-            prior_unc = [
+            prior = [
                 sample_neg(
                     prior_cov,
                     self.num_classes,
                     probs[idx] if probs is not None else None,
                 )
-                for i in range(self.num_pri)
+                for _ in range(self.num_pri)
             ]
-            prior = [
-                (prior_cov + prior_unc[i]).clamp(max=1.0) for i in range(self.num_pri)
-            ]
-            prior = [
-                prior[i] / prior[i].sum(1, keepdim=True) for i in range(self.num_pri)
-            ]
+            prior = [p / p.sum(1, keepdim=True) for p in prior]
 
             mov1.update_hist(outputs.softmax(1), idx)
             log_outputs = outputs.log_softmax(1)
@@ -208,23 +252,22 @@ class ANIMAL_Trainer:
             # self.train_acc.update(self.calc_acc(outputs, clean.int()).item() * 100.0)
 
     @torch.no_grad()
-    def eval_train(self, net: nn.Module, num_classes=100):
+    def eval_train(self, net: nn.Module, estimator: LossWeightEstimator, num_classes=100):
         net.eval()
-        losses = torch.zeros(50000)
+        losses = torch.zeros(self.num_samples)
+        confidences = torch.zeros(self.num_samples)
         for batch_idx, (inputs, targets, index) in enumerate(self.eval_loader):
             inputs, targets = inputs.cuda(), targets.cuda()
-            outputs, tildey, _ = net(inputs)
+            outputs, _, _ = net(inputs)
             loss = F.cross_entropy(outputs, targets, reduction="none")
-            for b in range(inputs.size(0)):
-                losses[index[b]] = loss[b]
-        losses = ((losses - losses.min()) / (losses.max() - losses.min())).unsqueeze(1)
-        input_loss = losses.reshape(-1, 1)
-        # fit a two-component GMM to the loss
-        gmm = GaussianMixture(n_components=2, max_iter=20, tol=1e-2, reg_covar=5e-4)
-        gmm.fit(input_loss)
-        prob = gmm.predict_proba(input_loss)
-        prob = prob[:, gmm.means_.argmin()]
-        return 1 - torch.from_numpy(prob).cuda()
+            conf = outputs.softmax(1).gather(1, targets.unsqueeze(1)).squeeze(1)
+            losses[index] = loss.detach().cpu()
+            confidences[index] = conf.detach().cpu()
+
+        estimator.update(losses, confidences)
+        clean_prob = estimator.predict_clean_probability()
+        noisy_prob = (1.0 - clean_prob).clamp(1e-4, 1.0 - 1e-4)
+        return noisy_prob.cuda()
 
     @torch.no_grad()
     def test(self, net, net2=None):
