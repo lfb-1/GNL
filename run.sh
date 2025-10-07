@@ -1,14 +1,14 @@
 # CIFAR10
-# for s in  42 385 386 2024 2025
-# do
-#     for j in pxy pyx 
-#     do
-#         for i in 0.2 0.3 0.4 0.5
-#         do
-#             python main.py --r $i  --desc "c10"$j"_wkl_"$i"_"$s --optim_goal $j --config cifar10 --seed $s;
-#         done
-#     done
-# done
+for s in  42 385 386 2024 2025
+do
+    for j in pxy pyx 
+    do
+        for i in 0.2 0.3 0.4 0.5
+        do
+            python main.py --r $i  --desc "c10"$j"_final_"$i"_"$s --optim_goal $j --config cifar10 --seed $s;
+        done
+    done
+done
 
 # CIFAR100
 # for s in 42 385 386 2024 2025
@@ -17,7 +17,7 @@
 #     do
 #         for i in 0.2 0.3 0.4 0.5
 #         do
-#             python main.py --r $i --root /home/fbl/Documents/Data/cifar-100-python/ --desc "c100"$j"_wkl_"$i"_"$s --optim_goal $j --config cifar100 --seed $s;
+#             python main.py --r $i  --desc "c100"$j"_final_"$i"_"$s --optim_goal $j --config cifar100 --seed $s;
 #         done
 #     done
 # done
@@ -35,16 +35,16 @@
 # done
 
 # CIFAR100N
-for j in pxy pyx
-do
-    for s in 123 385 386 2024 2025
-    do
-        for i in noisy_label
-        do
-            python main.py --target $i --root /home/fbl/Documents/Data/cifar-100-python/ --desc "c100N"$j"_wkl_"$i"_"$s --optim_goal $j --config cifar100n --seed $s;
-        done
-    done
-done
+# for j in pxy pyx
+# do
+#     for s in 123 385 386 2024 2025
+#     do
+#         for i in noisy_label
+#         do
+#             python main.py --target $i --desc "c100N"$j"_final_"$i"_"$s --optim_goal $j --config cifar100n --seed $s;
+#         done
+#     done
+# done
 
 # RED
 # for i in 0.2 0.4 0.6 0.8

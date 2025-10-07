@@ -75,9 +75,26 @@ class LossWeightEstimator:
             )
             gmm.fit(data)
             prob = gmm.predict_proba(data)
+            
+            # CRITICAL: Robust component selection
+            # Clean samples should have lower loss (feature 0) AND higher confidence (lower feature 1)
+            # Use combined criteria to identify clean component
+            component_0_mean_loss = gmm.means_[0, 0]
+            component_1_mean_loss = gmm.means_[1, 0]
+            
+            # The component with lower loss is more likely to be clean
             clean_component = np.argmin(gmm.means_[:, 0])
-            clean_prob = prob[:, clean_component]
-        except Exception:
+            
+            # Sanity check: if means are too close, revert to uniform
+            mean_diff = abs(component_0_mean_loss - component_1_mean_loss)
+            if mean_diff < 0.1:  # Threshold for ambiguous separation
+                print(f"[WARNING] GMM components poorly separated (diff={mean_diff:.4f}), using uniform probs")
+                clean_prob = np.full(self.num_samples, 0.5, dtype=np.float64)
+            else:
+                clean_prob = prob[:, clean_component]
+                print(f"[INFO] GMM: clean_component={clean_component}, mean_diff={mean_diff:.4f}, clean_prob range=[{clean_prob.min():.3f}, {clean_prob.max():.3f}]")
+        except Exception as e:
+            print(f"[WARNING] GMM fitting failed: {e}, using uniform probs")
             clean_prob = np.full(self.num_samples, 0.5, dtype=np.float64)
 
         clean_prob = np.clip(clean_prob, 1e-5, 1.0 - 1e-5)

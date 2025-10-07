@@ -18,7 +18,7 @@ def cifar10_configs(r, root_dir, optim_goal="pxy"):
     config["wandb"] = True
     config["beta"] = 0.9
     config["lr_decay"] = [100]
-    config["num_prior"] = 1
+    config["num_prior"] = 2
     config["optim_goal"] = optim_goal
     config["memory_queue_len"] = 3
     return EasyDict(config)
@@ -41,9 +41,9 @@ def cifar100_configs(r, root_dir, optim_goal="pxy"):
     config["wandb"] = True
     config["beta"] = 0.9
     config["lr_decay"] = [100]
-    config["num_prior"] = 1
+    config["num_prior"] = 2
     config["optim_goal"] = optim_goal
-    config["memory_queue_len"] = 10
+    config["memory_queue_len"] = 3
     return EasyDict(config)
 
 
@@ -64,7 +64,7 @@ def red_configs(r, root_dir, optim_goal="pxy"):
     config["wandb"] = True
     config["beta"] = 0.9
     config["lr_decay"] = [100]
-    config["num_prior"] = 1
+    config["num_prior"] = 2
     config["optim_goal"] = optim_goal
     return EasyDict(config)
 
@@ -87,7 +87,7 @@ def cifar10n_configs(target, root_dir, optim_goal="pxy"):
     config["wandb"] = True
     config["beta"] = 0.9
     config["lr_decay"] = [100]  # 150/250
-    config["num_prior"] = 1
+    config["num_prior"] = 2
     config["optim_goal"] = optim_goal
     config["memory_queue_len"] = 3
     return EasyDict(config)
@@ -111,7 +111,7 @@ def cifar100n_configs(target, root_dir, optim_goal="pxy"):
     config["wandb"] = True
     config["beta"] = 0.9
     config["lr_decay"] = [100]
-    config["num_prior"] = 1
+    config["num_prior"] = 2
     config["optim_goal"] = optim_goal
     config["memory_queue_len"] = 3
     return EasyDict(config)

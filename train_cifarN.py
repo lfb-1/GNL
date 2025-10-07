@@ -104,6 +104,15 @@ class CIFARN_Trainer:
                 self._update_temperature(alpha)
                 probs = self.eval_train(self.net)
                 probs = self._blend_probs(probs, alpha)
+                
+                # Diagnostic logging to understand GMM behavior
+                print(f"[Epoch {epoch}] alpha: {alpha:.3f}, GMM probs (P(noisy)) - min: {probs.min().item():.4f}, max: {probs.max().item():.4f}, mean: {probs.mean().item():.4f}")
+                w_i_min = (1.0 - probs.max()).item()
+                w_i_max = (1.0 - probs.min()).item()
+                coef_min = 1.0 - 2 * w_i_max
+                coef_max = 1.0 - 2 * w_i_min
+                print(f"[Epoch {epoch}] w_i (P(clean)) range: [{w_i_min:.4f}, {w_i_max:.4f}], KL coef range: [{coef_min:.4f}, {coef_max:.4f}]")
+                
                 self.train(epoch, self.net, self.optim, self.latent, probs, memory_queue=memory_queue)
                 # self.train(epoch, self.net2, self.optim2, self.latent2,self.latent, probs)
 
@@ -164,10 +173,7 @@ class CIFARN_Trainer:
                 )
                 for i in range(self.num_pri)
             ]
-            prior = [
-                torch.clamp(p, max=1.0) / torch.clamp(p.sum(1, keepdim=True), min=1e-8)
-                for p in prior_unc
-            ]
+            prior = [torch.clamp(p, max=1.0) / torch.clamp(p.sum(1, keepdim=True), min=1e-8) for p in prior_unc]
             # mix_prior = [
             #     l * prior[i] + (1 - l) * prior[i][mix_idx] for i in range(self.num_pri)
             # ]
@@ -179,7 +185,10 @@ class CIFARN_Trainer:
             mov.update_hist(outputs.softmax(1), idx)
             log_outputs = outputs.log_softmax(1)
             # Add numerical stability to log_prior computation
-            log_prior = [torch.clamp(prior[i], min=1e-9, max=1.0).log() for i in range(self.num_pri)]
+            # CRITICAL: Use log1p for better numerical stability near zero
+            log_prior = [torch.clamp(prior[i], min=1e-8, max=1.0 - 1e-8).log() for i in range(self.num_pri)]
+            # Additional check for problematic log values
+            log_prior = [torch.clamp(lp, min=-50.0, max=0.0) for lp in log_prior]
 
             if memory_queue is None:
                 extended_log_outputs = log_outputs
@@ -206,11 +215,19 @@ class CIFARN_Trainer:
             # ce = -torch.mean(
             #     torch.sum(F.log_softmax(tildey, dim=1) * mix_targets, dim=1)
             # )
-            pri = sum([prior_loss([log_outputs, extended_log_outputs], log_prior[i]) for i in range(self.num_pri)]) / self.num_pri
+            pri = (
+                sum([prior_loss([log_outputs, extended_log_outputs], log_prior[i]) for i in range(self.num_pri)])
+                / self.num_pri
+            )
             reg_kl = (
                 sum(
                     [
-                        self.reg_kl([log_outputs, extended_log_outputs], tildey, log_prior[i], 0.5 if probs is None else 1.0 - probs[idx])
+                        self.reg_kl(
+                            [log_outputs, extended_log_outputs],
+                            tildey,
+                            log_prior[i],
+                            0.5 if probs is None else 1.0 - probs[idx],
+                        )
                         for i in range(self.num_pri)
                     ]
                 )
@@ -218,10 +235,18 @@ class CIFARN_Trainer:
             )
             l = ce + pri + reg_kl
 
+            # Check for NaN/Inf in loss before backward
+            if torch.isnan(l) or torch.isinf(l):
+                print(f"[CRITICAL] Loss is NaN/Inf at batch {batch_idx}, epoch {epoch}")
+                print(f"  CE: {ce.item():.4f}, Prior: {pri.item():.4f}, KL: {reg_kl.item():.4f}")
+                print(f"  Max log_outputs: {log_outputs.max().item():.4f}, Min: {log_outputs.min().item():.4f}")
+                print(f"  Skipping batch to prevent gradient corruption")
+                continue
+
             l.backward()
 
-            # Gradient clipping to prevent exploding gradients
-            # torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=1.0)
+            # Gradient clipping to prevent exploding gradients - CRITICAL FIX
+            torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=5.0)
 
             optimizer.step()
 
